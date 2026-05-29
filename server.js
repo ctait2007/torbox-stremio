@@ -11,18 +11,31 @@ app.use((req, res, next) => {
  next();
 });
 
+function detectType(name) {
+ if (/S\d{2}E\d{2}/i.test(name)) return 'series';
+ if (/S\d{2}\b/i.test(name)) return 'series';
+ if (/Season\s*\d+/i.test(name)) return 'series';
+ if (/\d+x\d+/i.test(name)) return 'series';
+ return 'movie';
+}
+
 function cleanTitle(name) {
  return name
    .replace(/\.(mkv|mp4|avi)$/i, '')
-   .replace(/[\._]/g, ' ')
-   .replace(/\b(19|20)\d{2}\b.*/, '')
+   .replace(/S\d{2}(E\d{2})?.*$/i, '')   // strip season/episode and everything after
+   .replace(/\b(19|20)\d{2}\b.*/, '')     // strip year and everything after
    .replace(/\b(1080p|720p|4k|bluray|webrip|hdtv|x264|x265|hevc)\b.*/i, '')
+   .replace(/[\._]/g, ' ')
    .trim();
 }
 
 function extractYear(name) {
  const match = name.match(/\b(19|20)(\d{2})\b/);
  return match ? parseInt(match[0]) : null;
+}
+
+function normalizeTitle(str) {
+ return str.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
 }
 
 async function getTorboxLibrary() {
@@ -33,28 +46,32 @@ async function getTorboxLibrary() {
  return json.data || [];
 }
 
-function normalizeTitle(str) {
-  return str.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
-}
-
 async function searchTmdb(title, year, type) {
-  const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`;
-  const res = await fetch(url);
-  const json = await res.json();
+ const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`;
+ const res = await fetch(url);
+ const json = await res.json();
 
-  const normalizedSearch = normalizeTitle(title);
-  const tmdbType = type === 'series' ? 'tv' : 'movie';
+ const normalizedSearch = normalizeTitle(title);
+ const tmdbType = type === 'series' ? 'tv' : 'movie';
 
-  // Only accept results that match both the title AND the correct media type
-  const match = json.results?.find(r => {
-    if (r.media_type !== tmdbType) return false;
-    const resultTitle = normalizeTitle(r.title || r.name || '');
-    return resultTitle === normalizedSearch;
-  });
+ // First try exact match with correct type
+ let match = json.results?.find(r => {
+   if (r.media_type !== tmdbType) return false;
+   const resultTitle = normalizeTitle(r.title || r.name || '');
+   return resultTitle === normalizedSearch;
+ });
 
-  return match || null;
+ // If no exact match, try startsWith (catches "Scream: The TV Series" etc)
+ if (!match) {
+   match = json.results?.find(r => {
+     if (r.media_type !== tmdbType) return false;
+     const resultTitle = normalizeTitle(r.title || r.name || '');
+     return resultTitle.startsWith(normalizedSearch);
+   });
+ }
+
+ return match || null;
 }
-
 
 async function getImdbId(tmdbId, type) {
  const endpoint = type === 'movie' ? 'movie' : 'tv';
@@ -91,6 +108,9 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
    const results = await Promise.all(
      torrents.map(async (torrent) => {
        try {
+         const detectedType = detectType(torrent.name);
+         if (detectedType !== type) return null;
+
          const title = cleanTitle(torrent.name);
          const year = extractYear(torrent.name);
          const tmdb = await searchTmdb(title, year, type);
@@ -118,6 +138,9 @@ app.get('/meta/:type/:id.json', async (req, res) => {
 
    for (const torrent of torrents) {
      try {
+       const detectedType = detectType(torrent.name);
+       if (detectedType !== type) continue;
+
        const title = cleanTitle(torrent.name);
        const year = extractYear(torrent.name);
        const tmdb = await searchTmdb(title, year, type);
@@ -145,6 +168,9 @@ app.get('/stream/:type/:id.json', async (req, res) => {
    const matches = await Promise.all(
      torrents.map(async (torrent) => {
        try {
+         const detectedType = detectType(torrent.name);
+         if (detectedType !== type) return null;
+
          const title = cleanTitle(torrent.name);
          const year = extractYear(torrent.name);
          const tmdb = await searchTmdb(title, year, type);
