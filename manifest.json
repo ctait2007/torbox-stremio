@@ -6,7 +6,7 @@
   "logo": "https://torbox.app/favicon.ico",
   "background": "https://image.tmdb.org/t/p/original/jf7AWfBrGROEd8dOQtLGmOYIRuQ.jpg",
   "contactEmail": "your@email.com",
-  "resources": ["catalog", "meta", "stream"],
+  "resources": ["catalog", "stream"],
   "types": ["movie", "series"],
   "idPrefixes": ["tt"],
   "catalogs": [
