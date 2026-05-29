@@ -256,3 +256,8 @@ app.get('/debug-stream/:type/:id', async (req, res) => {
 
   res.json(results);
 });
+app.get('/debug-files/:id', async (req, res) => {
+  const torrents = await getTorboxLibrary();
+  const torrent = torrents.find(t => String(t.id) === req.params.id);
+  res.json(torrent || { error: 'not found' });
+});
