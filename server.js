@@ -233,3 +233,15 @@ app.get('/debug', async (req, res) => {
   }));
   res.json(debug);
 });
+
+app.get('/debug-tmdb', async (req, res) => {
+  const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=Scream`;
+  const response = await fetch(url);
+  const json = await response.json();
+  res.json(json.results?.map(r => ({
+    title: r.title || r.name,
+    type: r.media_type,
+    year: (r.release_date || r.first_air_date || '').slice(0, 4)
+  })));
+});
+
