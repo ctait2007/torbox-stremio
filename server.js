@@ -5,6 +5,17 @@ const manifest = require('./manifest.json');
 const TORBOX_API_KEY = process.env.TORBOX_API_KEY;
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
+// Cache
+const cache = {
+  torboxLibrary: null,
+  torboxLibraryExpiry: 0,
+  tmdb: new Map(),
+  imdbId: new Map()
+};
+
+const TORBOX_CACHE_TTL = 5 * 60 * 1000;   // 5 minutes
+const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -72,7 +83,6 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
     ? ` • S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
     : '';
   const line1 = title ? `🎬 ${title}${episodeTag}` : null;
-
   const line2 = resIcon;
 
   const qualityParts = [
@@ -95,45 +105,83 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
 }
 
 async function getTorboxLibrary() {
+  const now = Date.now();
+  if (cache.torboxLibrary && now < cache.torboxLibraryExpiry) {
+    return cache.torboxLibrary;
+  }
   const res = await fetch('https://api.torbox.app/v1/api/torrents/mylist', {
     headers: { Authorization: `Bearer ${TORBOX_API_KEY}` }
   });
   const json = await res.json();
-  return json.data || [];
+  cache.torboxLibrary = json.data || [];
+  cache.torboxLibraryExpiry = now + TORBOX_CACHE_TTL;
+  return cache.torboxLibrary;
 }
 
-async function searchTmdb(title, year, type) {
-  const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`;
-  const res = await fetch(url);
-  const json = await res.json();
+async function searchTmdb(title, year, type, retries = 3) {
+  const cacheKey = `${title}:${type}`;
+  const cached = cache.tmdb.get(cacheKey);
+  if (cached && Date.now() < cached.expiry) return cached.value;
 
-  const normalizedSearch = normalizeTitle(title);
-  const tmdbType = type === 'series' ? 'tv' : 'movie';
+  for (let i = 0; i < retries; i++) {
+    try {
+      const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`;
+      const res = await fetch(url);
+      const json = await res.json();
 
-  let match = json.results?.find(r => {
-    if (r.media_type !== tmdbType) return false;
-    const resultTitle = normalizeTitle(r.title || r.name || '');
-    return resultTitle === normalizedSearch;
-  });
+      const normalizedSearch = normalizeTitle(title);
+      const tmdbType = type === 'series' ? 'tv' : 'movie';
 
-  if (!match) {
-    match = json.results?.find(r => {
-      if (r.media_type !== tmdbType) return false;
-      const beforeColon = normalizeTitle((r.title || r.name || '').split(':')[0]);
-      return beforeColon === normalizedSearch;
-    });
+      let match = json.results?.find(r => {
+        if (r.media_type !== tmdbType) return false;
+        const resultTitle = normalizeTitle(r.title || r.name || '');
+        return resultTitle === normalizedSearch;
+      });
+
+      if (!match) {
+        match = json.results?.find(r => {
+          if (r.media_type !== tmdbType) return false;
+          const beforeColon = normalizeTitle((r.title || r.name || '').split(':')[0]);
+          return beforeColon === normalizedSearch;
+        });
+      }
+
+      cache.tmdb.set(cacheKey, { value: match || null, expiry: Date.now() + TMDB_CACHE_TTL });
+      return match || null;
+    } catch (e) {
+      console.error(`TMDB search attempt ${i + 1} failed for "${title}":`, e.message);
+    }
+    if (i < retries - 1) await new Promise(r => setTimeout(r, 500));
   }
 
-  return match || null;
+  cache.tmdb.set(cacheKey, { value: null, expiry: Date.now() + TMDB_CACHE_TTL });
+  return null;
 }
 
-async function getImdbId(tmdbId, type) {
+async function getImdbId(tmdbId, type, retries = 3) {
+  const cacheKey = `${tmdbId}:${type}`;
+  const cached = cache.imdbId.get(cacheKey);
+  if (cached && Date.now() < cached.expiry) return cached.value;
+
   const endpoint = type === 'movie' ? 'movie' : 'tv';
-  const res = await fetch(
-    `https://api.themoviedb.org/3/${endpoint}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`
-  );
-  const json = await res.json();
-  return json.imdb_id || null;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(
+        `https://api.themoviedb.org/3/${endpoint}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`
+      );
+      const json = await res.json();
+      if (json.imdb_id) {
+        cache.imdbId.set(cacheKey, { value: json.imdb_id, expiry: Date.now() + TMDB_CACHE_TTL });
+        return json.imdb_id;
+      }
+    } catch (e) {
+      console.error(`IMDB ID lookup attempt ${i + 1} failed:`, e.message);
+    }
+    if (i < retries - 1) await new Promise(r => setTimeout(r, 500));
+  }
+
+  cache.imdbId.set(cacheKey, { value: null, expiry: Date.now() + TMDB_CACHE_TTL });
+  return null;
 }
 
 function toMeta(tmdb, imdbId, torrentId, type) {
