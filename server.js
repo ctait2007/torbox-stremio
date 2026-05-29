@@ -224,6 +224,8 @@ app.get('/meta/:type/:id.json', async (req, res) => {
 app.get('/stream/:type/:id.json', async (req, res) => {
  try {
    console.log('Stream request:', req.params);
+  console.log('Files for episode:', files.map(f => ({ name: f.short_name, mime: f.mimetype })));
+
 
    const { type } = req.params;
    const rawId = req.params.id;
