@@ -67,31 +67,25 @@ async function searchTmdb(title, year, type) {
   const normalizedSearch = normalizeTitle(title);
   const tmdbType = type === 'series' ? 'tv' : 'movie';
 
-  const match = json.results?.find(r => {
+  // exact title match
+  let match = json.results?.find(r => {
     if (r.media_type !== tmdbType) return false;
     const resultTitle = normalizeTitle(r.title || r.name || '');
-    if (resultTitle !== normalizedSearch) return false;
-    // if we have a year, use it to confirm the right result
-    if (year) {
-      const releaseYear = parseInt(
-        (r.release_date || r.first_air_date || '').slice(0, 4)
-      );
-      if (releaseYear && Math.abs(releaseYear - year) > 1) return false;
-    }
-    return true;
+    return resultTitle === normalizedSearch;
   });
 
-  // fallback: match title without year filter if year-filtered match failed
+  // colon subtitle match e.g. "Scream: The TV Series" → "Scream"
   if (!match) {
-    return json.results?.find(r => {
+    match = json.results?.find(r => {
       if (r.media_type !== tmdbType) return false;
-      const resultTitle = normalizeTitle(r.title || r.name || '');
-      return resultTitle === normalizedSearch;
-    }) || null;
+      const beforeColon = normalizeTitle((r.title || r.name || '').split(':')[0]);
+      return beforeColon === normalizedSearch;
+    });
   }
 
-  return match;
+  return match || null;
 }
+
 
 async function getImdbId(tmdbId, type) {
  const endpoint = type === 'movie' ? 'movie' : 'tv';
