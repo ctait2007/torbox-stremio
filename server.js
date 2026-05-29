@@ -51,33 +51,54 @@ function normalizeTitle(str) {
  return str.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
 }
 
-function formatStreamDescription(filename) {
- const res = filename.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] || null;
- const quality = filename.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] || null;
- const encode = filename.match(/\b(x264|x265|h264|h265|hevc|avc)\b/i)?.[1] || null;
- const audio = filename.match(/\b(aac|ac3|dts|atmos|truehd|dd5|eac3|flac)\b/i)?.[1] || null;
- const hdr = filename.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] || null;
- const bitDepth = filename.match(/\b(10bit|8bit)\b/i)?.[1] || null;
+function formatStreamDescription(filename, title, season, episode, filesize) {
+  const res = filename.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] || null;
+  const quality = filename.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] || null;
+  const encode = filename.match(/\b(x264|x265|h264|h265|hevc|avc)\b/i)?.[1] || null;
+  const audio = filename.match(/\b(aac|ac3|dts|atmos|truehd|dd5|eac3|flac)\b/i)?.[1] || null;
+  const hdr = filename.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] || null;
+  const bitDepth = filename.match(/\b(10bit|8bit)\b/i)?.[1] || null;
+  const container = filename.match(/\.(mkv|mp4|avi|mov|wmv)$/i)?.[1] || null;
 
- const resIcon = res ? ({
-   '2160p': '⭐️ 4K',
-   '1080p': '💎 1080p',
-   '720p': '💿 720p',
-   '576p': '📀 SD',
-   '480p': '📀 LQ'
- }[res.toLowerCase()] || `📺 ${res}`) : '⁉️ Unknown';
+  const resIcon = res ? ({
+    '2160p': '⭐️ 4K',
+    '1080p': '💎 1080p',
+    '720p': '💿 720p',
+    '576p': '📀 SD',
+    '480p': '📀 LQ'
+  }[res.toLowerCase()] || `📺 ${res}`) : '⁉️ Unknown';
 
- const parts = [
-   resIcon,
-   quality ? `🎥 ${quality.toUpperCase()}` : null,
-   encode ? `➤ ${encode.toUpperCase()}` : null,
-   hdr ? `➤ ${hdr.toUpperCase()}` : null,
-   bitDepth ? `➤ ${bitDepth}` : null,
-   audio ? `🎧 ${audio.toUpperCase()}` : null,
- ].filter(Boolean);
+  // Line 1: title + season/episode if series
+  const episodeTag = (season !== null && episode !== null)
+    ? ` • S${String(season).padStart(2,'0')}E${String(episode).padStart(2,'0')}`
+    : '';
+  const line1 = title ? `🎬 ${title}${episodeTag}` : null;
 
- return parts.join(' ');
+  // Line 2: resolution
+  const line2 = resIcon;
+
+  // Line 3: quality + encode + hdr + bitdepth
+  const qualityParts = [
+    quality ? `🎥 ${quality.toUpperCase()}` : null,
+    encode ? `➤ ${encode.toUpperCase()}` : null,
+    hdr ? `➤ ${hdr.toUpperCase()}` : null,
+    bitDepth ? `➤ ${bitDepth}` : null,
+  ].filter(Boolean);
+  const line3 = qualityParts.length > 0 ? qualityParts.join(' ') : null;
+
+  // Line 4: audio
+  const line4 = audio ? `🎧 ${audio.toUpperCase()}` : null;
+
+  // Line 5: filesize + container
+  const sizeStr = filesize > 0
+    ? `📦 ${(filesize / 1024 / 1024 / 1024).toFixed(2)} GB`
+    : null;
+  const containerStr = container ? `.${container.toLowerCase()}` : null;
+  const line5 = [sizeStr, containerStr].filter(Boolean).join(' ➤ ');
+
+  return [line1, line2, line3, line4, line5].filter(Boolean).join('\n');
 }
+
 
 async function getTorboxLibrary() {
  const res = await fetch('https://api.torbox.app/v1/api/torrents/mylist', {
@@ -246,10 +267,17 @@ app.get('/stream/:type/:id.json', async (req, res) => {
    }
 
    const streams = files.map(file => ({
-     url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
-     name: '👑 Library ⚡️',
-     description: formatStreamDescription(file.short_name || file.name || '')
-   }));
+  url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
+  name: '👑 Library ⚡️',
+  description: formatStreamDescription(
+    file.short_name || file.name || '',
+    cleanTitle(torrent.name),
+    season,
+    episode,
+    file.size || 0
+  )
+}));
+
 
    res.json({ streams });
  } catch (err) {
