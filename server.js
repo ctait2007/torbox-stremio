@@ -51,6 +51,34 @@ function normalizeTitle(str) {
  return str.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
 }
 
+function formatStreamDescription(filename) {
+ const res = filename.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] || null;
+ const quality = filename.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] || null;
+ const encode = filename.match(/\b(x264|x265|h264|h265|hevc|avc)\b/i)?.[1] || null;
+ const audio = filename.match(/\b(aac|ac3|dts|atmos|truehd|dd5|eac3|flac)\b/i)?.[1] || null;
+ const hdr = filename.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] || null;
+ const bitDepth = filename.match(/\b(10bit|8bit)\b/i)?.[1] || null;
+
+ const resIcon = res ? ({
+   '2160p': '⭐️ 4K',
+   '1080p': '💎 1080p',
+   '720p': '💿 720p',
+   '576p': '📀 SD',
+   '480p': '📀 LQ'
+ }[res.toLowerCase()] || `📺 ${res}`) : '⁉️ Unknown';
+
+ const parts = [
+   resIcon,
+   quality ? `🎥 ${quality.toUpperCase()}` : null,
+   encode ? `➤ ${encode.toUpperCase()}` : null,
+   hdr ? `➤ ${hdr.toUpperCase()}` : null,
+   bitDepth ? `➤ ${bitDepth}` : null,
+   audio ? `🎧 ${audio.toUpperCase()}` : null,
+ ].filter(Boolean);
+
+ return parts.join(' ');
+}
+
 async function getTorboxLibrary() {
  const res = await fetch('https://api.torbox.app/v1/api/torrents/mylist', {
    headers: { Authorization: `Bearer ${TORBOX_API_KEY}` }
@@ -219,7 +247,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
    const streams = files.map(file => ({
      url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
-     title: file.short_name || file.name || 'Play'
+     name: '👑 Library ⚡️',
+     description: formatStreamDescription(file.short_name || file.name || '')
    }));
 
    res.json({ streams });
