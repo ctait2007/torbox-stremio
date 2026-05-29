@@ -12,28 +12,32 @@ app.use((req, res, next) => {
 });
 
 function detectType(name) {
-  if (/S\d{2}E\d{2}/i.test(name)) return 'series';
-  if (/S\d{2}\b/i.test(name)) return 'series';
-  if (/Season\s*\d+/i.test(name)) return 'series';
-  if (/\d+x\d+/i.test(name)) return 'series';
-  if (/Complete\s*Series/i.test(name)) return 'series';
-  if (/\(S\d+/i.test(name)) return 'series';
-  return 'movie';
+ if (/S\d{2}E\d{2}/i.test(name)) return 'series';
+ if (/S\d{2}\b/i.test(name)) return 'series';
+ if (/Season\s*\d+/i.test(name)) return 'series';
+ if (/\d+x\d+/i.test(name)) return 'series';
+ if (/Complete\s*Series/i.test(name)) return 'series';
+ if (/\(S\d+/i.test(name)) return 'series';
+ if (/INTEGRALE/i.test(name)) return 'series';
+ return 'movie';
 }
 
 function cleanTitle(name) {
-  return name
-    .replace(/\.(mkv|mp4|avi|mov|wmv)$/i, '')  // strip file extension
-    .replace(/\[.*?\]/g, '')                     // strip [anything in brackets]
-    .replace(/\(S\d+.*?\)/gi, '')               // strip (S01 - S03) style season ranges
-    .replace(/Complete\s*Series.*/gi, '')        // strip "Complete Series" onwards
-    .replace(/S\d{2}(E\d{2})?.*$/i, '')         // strip S01 / S01E01 onwards
-    .replace(/Season\s*\d+.*/i, '')             // strip "Season 1" onwards
-    .replace(/\b(19|20)\d{2}\b.*/,'')           // strip year onwards
-    .replace(/\b(1080p|720p|2160p|4k|bluray|bdrip|webrip|web-dl|hdtv|x264|x265|hevc|aac|dd5|h264|h265|remux)\b.*/i, '') // strip quality tags onwards
-    .replace(/[\._]/g, ' ')                     // dots and underscores to spaces
-    .replace(/\s+/g, ' ')                       // collapse multiple spaces
-    .trim();
+ return name
+   .replace(/\.(mkv|mp4|avi|mov|wmv)$/i, '')
+   .replace(/\[.*?\]/g, '')
+   .replace(/\(S\d+.*?\)/gi, '')
+   .replace(/Complete\s*Series.*/gi, '')
+   .replace(/INTEGRALE.*/i, '')
+   .replace(/S\d{2}(E\d{2})?.*$/i, '')
+   .replace(/Season\s*\d+.*/i, '')
+   .replace(/\b(19|20)\d{2}\b.*/, '')
+   .replace(/\b(MULTi|MULTI|VFF|VF|VO|VOST|TRUEFRENCH)\b.*/i, '')
+   .replace(/\b(LF|proper|repack|extended|theatrical|directors.cut)\b.*/i, '')
+   .replace(/\b(1080p|720p|2160p|4k|bluray|bdrip|webrip|web-dl|web|hdtv|x264|x265|hevc|aac|dd5|h264|h265|remux|hdlight|10bit|ac3)\b.*/i, '')
+   .replace(/[\._]/g, ' ')
+   .replace(/\s+/g, ' ')
+   .trim();
 }
 
 function extractYear(name) {
@@ -61,21 +65,11 @@ async function searchTmdb(title, year, type) {
  const normalizedSearch = normalizeTitle(title);
  const tmdbType = type === 'series' ? 'tv' : 'movie';
 
- // First try exact match with correct type
- let match = json.results?.find(r => {
+ const match = json.results?.find(r => {
    if (r.media_type !== tmdbType) return false;
    const resultTitle = normalizeTitle(r.title || r.name || '');
    return resultTitle === normalizedSearch;
  });
-
- // If no exact match, try startsWith (catches "Scream: The TV Series" etc)
- if (!match) {
-   match = json.results?.find(r => {
-     if (r.media_type !== tmdbType) return false;
-     const resultTitle = normalizeTitle(r.title || r.name || '');
-     return resultTitle.startsWith(normalizedSearch);
-   });
- }
 
  return match || null;
 }
