@@ -228,8 +228,8 @@ app.get('/debug', async (req, res) => {
   res.json(debug);
 });
 
-app.get('/debug-tmdb', async (req, res) => {
-  const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=Scream`;
+app.get('/debug-aot', async (req, res) => {
+  const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=Attack+on+Titan`;
   const response = await fetch(url);
   const json = await response.json();
   res.json(json.results?.map(r => ({
@@ -238,4 +238,3 @@ app.get('/debug-tmdb', async (req, res) => {
     year: (r.release_date || r.first_air_date || '').slice(0, 4)
   })));
 });
-
