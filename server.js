@@ -204,3 +204,13 @@ app.get('/manifest.json', (req, res) => res.json(manifest));
 app.get('/', (req, res) => res.json(manifest));
 
 app.listen(3000, () => console.log('TorBox addon running'));
+
+app.get('/debug', async (req, res) => {
+  const torrents = await getTorboxLibrary();
+  const debug = torrents.map(t => ({
+    original: t.name,
+    cleaned: cleanTitle(t.name),
+    detectedType: detectType(t.name)
+  }));
+  res.json(debug);
+});
