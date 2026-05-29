@@ -1,6 +1,8 @@
 const express = require('express');
 const app = express();
 const manifest = require('./manifest.json');
+const TORBOX_API_KEY = process.env.TORBOX_API_KEY;
+const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
