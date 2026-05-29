@@ -116,8 +116,6 @@ function toMeta(tmdb, imdbId, torrentId, type) {
 
 app.get('/catalog/:type/:id.json', async (req, res) => {
  try {
-  console.log('Stream request:', req.params);
-
    const { type } = req.params;
    const torrents = await getTorboxLibrary();
 
@@ -180,6 +178,8 @@ const id = req.params.id.split(':')[0];
 
 app.get('/stream/:type/:id.json', async (req, res) => {
   try {
+   console.log('Stream request:', req.params);
+
     const { type } = req.params;
     const rawId = req.params.id;
     
