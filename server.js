@@ -38,23 +38,23 @@ function normalizeTitle(str) {
 }
 
 async function searchTmdb(title, year, type) {
-  const endpoint = type === 'movie' ? 'movie' : 'tv';
-  const yearParam = year ? `&year=${year}` : '';
-  const url = `https://api.themoviedb.org/3/search/${endpoint}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}${yearParam}`;
+  const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`;
   const res = await fetch(url);
   const json = await res.json();
 
   const normalizedSearch = normalizeTitle(title);
+  const tmdbType = type === 'series' ? 'tv' : 'movie';
 
-  // Find the first result whose title is an exact normalized match
-  const exact = json.results?.find(r => {
+  // Only accept results that match both the title AND the correct media type
+  const match = json.results?.find(r => {
+    if (r.media_type !== tmdbType) return false;
     const resultTitle = normalizeTitle(r.title || r.name || '');
     return resultTitle === normalizedSearch;
   });
 
-  // Fall back to first result only if nothing matched exactly
-  return exact || null;
+  return match || null;
 }
+
 
 async function getImdbId(tmdbId, type) {
  const endpoint = type === 'movie' ? 'movie' : 'tv';
