@@ -224,7 +224,7 @@ app.get('/meta/:type/:id.json', async (req, res) => {
 app.get('/stream/:type/:id.json', async (req, res) => {
  try {
    console.log('Stream request:', req.params);
-  console.log('Files for episode:', files.map(f => ({ name: f.short_name, mime: f.mimetype })));
+  
 
 
    const { type } = req.params;
@@ -259,7 +259,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
    if (!torrent || !torrent.files?.length) return res.json({ streams: [] });
 
    let files = torrent.files;
-
+console.log('Files for episode:', files.map(f => ({ name: f.short_name, mime: f.mimetype })));
    if (season !== null && episode !== null) {
      const seasonStr = String(season).padStart(2, '0');
      const episodeStr = String(episode).padStart(2, '0');
