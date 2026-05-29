@@ -256,7 +256,9 @@ app.get('/stream/:type/:id.json', async (req, res) => {
    );
 
    const torrent = matches.find(Boolean);
-   if (!torrent || !torrent.files?.length) return res.json({ streams: [] });
+console.log('Matched torrent:', torrent ? torrent.name : 'NONE');
+if (!torrent || !torrent.files?.length) return res.json({ streams: [] });
+
 
    let files = torrent.files;
 console.log('Files for episode:', files.map(f => ({ name: f.short_name, mime: f.mimetype })));
