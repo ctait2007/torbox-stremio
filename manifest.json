@@ -64,19 +64,9 @@
   ],
 
   "behaviorHints": {
-    "adult": false,
-    "p2p": false,
-    "configurable": true,
-    "configurationRequired": true
-  },
-
-  "config": [
-    {
-      "key": "torboxApiKey",
-      "type": "text",
-      "title": "TorBox API Key",
-      "required": true
-    },
+  "adult": false,
+  "p2p": false
+},
     {
       "key": "tmdbApiKey",
       "type": "text",
