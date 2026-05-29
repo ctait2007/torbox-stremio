@@ -191,36 +191,6 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
  }
 });
 
-app.get('/meta/:type/:id.json', async (req, res) => {
- try {
-   const { type } = req.params;
-   const id = req.params.id.split(':')[0];
-   const torrents = await getTorboxLibrary();
-
-   for (const torrent of torrents) {
-     try {
-       const detectedType = detectType(torrent.name);
-       if (detectedType !== type) continue;
-
-       const title = cleanTitle(torrent.name);
-       const year = extractYear(torrent.name);
-       const tmdb = await searchTmdb(title, year, type);
-       if (!tmdb) continue;
-       const imdbId = await getImdbId(tmdb.id, type);
-       if (imdbId !== id) continue;
-       return res.json({ meta: toMeta(tmdb, imdbId, torrent.id, type) });
-     } catch (e) {
-       continue;
-     }
-   }
-
-   res.json({ meta: {} });
- } catch (err) {
-   console.error(err);
-   res.json({ meta: {} });
- }
-});
-
 app.get('/stream/:type/:id.json', async (req, res) => {
  try {
    console.log('Stream request:', req.params);
