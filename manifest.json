@@ -1,0 +1,101 @@
+{
+  "id": "community.torbox-tmdb-catalogue",
+  "version": "1.0.0",
+  "name": "TorBox Library",
+  "description": "Generates a personal catalogue from your TorBox library, enriched with metadata from TMDB.",
+  "logo": "https://torbox.app/favicon.ico",
+  "background": "https://image.tmdb.org/t/p/original/jf7AWfBrGROEd8dOQtLGmOYIRuQ.jpg",
+  "contactEmail": "your@email.com",
+
+  "resources": [
+    "catalog",
+    "meta",
+    "stream"
+  ],
+
+  "types": [
+    "movie",
+    "series"
+  ],
+
+  "idPrefixes": [
+    "torbox:"
+  ],
+
+  "catalogs": [
+    {
+      "id": "torbox-movies",
+      "type": "movie",
+      "name": "TorBox Movies",
+      "extra": [
+        {
+          "name": "search",
+          "isRequired": false
+        },
+        {
+          "name": "skip",
+          "isRequired": false
+        }
+      ],
+      "extraSupported": [
+        "search",
+        "skip"
+      ]
+    },
+    {
+      "id": "torbox-series",
+      "type": "series",
+      "name": "TorBox Series",
+      "extra": [
+        {
+          "name": "search",
+          "isRequired": false
+        },
+        {
+          "name": "skip",
+          "isRequired": false
+        }
+      ],
+      "extraSupported": [
+        "search",
+        "skip"
+      ]
+    }
+  ],
+
+  "behaviorHints": {
+    "adult": false,
+    "p2p": false,
+    "configurable": true,
+    "configurationRequired": true
+  },
+
+  "config": [
+    {
+      "key": "torboxApiKey",
+      "type": "text",
+      "title": "TorBox API Key",
+      "required": true
+    },
+    {
+      "key": "tmdbApiKey",
+      "type": "text",
+      "title": "TMDB API Key (v3)",
+      "required": true
+    },
+    {
+      "key": "tmdbLanguage",
+      "type": "text",
+      "title": "TMDB Language (e.g. en-US)",
+      "required": false,
+      "default": "en-US"
+    },
+    {
+      "key": "cacheTtlMinutes",
+      "type": "number",
+      "title": "Cache TTL in minutes",
+      "required": false,
+      "default": "60"
+    }
+  ]
+}
