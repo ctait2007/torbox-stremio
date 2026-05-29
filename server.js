@@ -228,13 +228,31 @@ app.get('/debug', async (req, res) => {
   res.json(debug);
 });
 
-app.get('/debug-aot', async (req, res) => {
-  const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=Attack+on+Titan`;
-  const response = await fetch(url);
-  const json = await response.json();
-  res.json(json.results?.map(r => ({
-    title: r.title || r.name,
-    type: r.media_type,
-    year: (r.release_date || r.first_air_date || '').slice(0, 4)
-  })));
+app.get('/debug-stream/:type/:id', async (req, res) => {
+  const { type, id } = req.params;
+  const torrents = await getTorboxLibrary();
+
+  const results = await Promise.all(
+    torrents.map(async (torrent) => {
+      try {
+        const detectedType = detectType(torrent.name);
+        const title = cleanTitle(torrent.name);
+        const year = extractYear(torrent.name);
+        const tmdb = await searchTmdb(title, year, type);
+        const imdbId = tmdb ? await getImdbId(tmdb.id, type) : null;
+        return {
+          torrent: torrent.name,
+          detectedType,
+          title,
+          imdbId,
+          matchesRequested: imdbId === id,
+          fileCount: torrent.files?.length || 0
+        };
+      } catch (e) {
+        return { torrent: torrent.name, error: e.message };
+      }
+    })
+  );
+
+  res.json(results);
 });
