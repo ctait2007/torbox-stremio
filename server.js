@@ -175,43 +175,49 @@ app.get('/meta/:type/:id.json', async (req, res) => {
 });
 
 app.get('/stream/:type/:id.json', async (req, res) => {
- try {
-   const { type, id } = req.params;
-   const torrents = await getTorboxLibrary();
+  try {
+    const { type } = req.params;
+    const rawId = req.params.id;
+    
+    // Stremio sends tt1234567:1:1 for series — strip season/episode
+    const id = rawId.split(':')[0];
 
-   const matches = await Promise.all(
-     torrents.map(async (torrent) => {
-       try {
-         const detectedType = detectType(torrent.name);
-         if (detectedType !== type) return null;
+    const torrents = await getTorboxLibrary();
 
-         const title = cleanTitle(torrent.name);
-         const year = extractYear(torrent.name);
-         const tmdb = await searchTmdb(title, year, type);
-         if (!tmdb) return null;
-         const imdbId = await getImdbId(tmdb.id, type);
-         if (imdbId !== id) return null;
-         return torrent;
-       } catch (e) {
-         return null;
-       }
-     })
-   );
+    const matches = await Promise.all(
+      torrents.map(async (torrent) => {
+        try {
+          const detectedType = detectType(torrent.name);
+          if (detectedType !== type) return null;
 
-   const torrent = matches.find(Boolean);
-   if (!torrent || !torrent.files?.length) return res.json({ streams: [] });
+          const title = cleanTitle(torrent.name);
+          const year = extractYear(torrent.name);
+          const tmdb = await searchTmdb(title, year, type);
+          if (!tmdb) return null;
+          const imdbId = await getImdbId(tmdb.id, type);
+          if (imdbId !== id) return null;
+          return torrent;
+        } catch (e) {
+          return null;
+        }
+      })
+    );
 
-   const streams = torrent.files.map(file => ({
-     url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
-     title: file.name || 'Play'
-   }));
+    const torrent = matches.find(Boolean);
+    if (!torrent || !torrent.files?.length) return res.json({ streams: [] });
 
-   res.json({ streams });
- } catch (err) {
-   console.error(err);
-   res.json({ streams: [] });
- }
+    const streams = torrent.files.map(file => ({
+      url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
+      title: file.name || 'Play'
+    }));
+
+    res.json({ streams });
+  } catch (err) {
+    console.error(err);
+    res.json({ streams: [] });
+  }
 });
+
 
 app.get('/manifest.json', (req, res) => res.json(manifest));
 app.get('/', (req, res) => res.json(manifest));
