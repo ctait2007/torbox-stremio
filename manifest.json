@@ -8,7 +8,7 @@
   "contactEmail": "your@email.com",
   "resources": ["catalog", "meta", "stream"],
   "types": ["movie", "series"],
-  "idPrefixes": ["tt:"],
+  "idPrefixes": ["tt"],
   "catalogs": [
     {
       "id": "torbox-movies",
