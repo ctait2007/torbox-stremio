@@ -147,7 +147,9 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 
 app.get('/meta/:type/:id.json', async (req, res) => {
  try {
-   const { type, id } = req.params;
+   const { type } = req.params;
+const id = req.params.id.split(':')[0];
+
    const torrents = await getTorboxLibrary();
 
    for (const torrent of torrents) {
