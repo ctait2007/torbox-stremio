@@ -262,7 +262,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
      const seasonStr = String(season).padStart(2, '0');
      const episodeStr = String(episode).padStart(2, '0');
      const pattern = new RegExp(`S${seasonStr}E${episodeStr}`, 'i');
-     const filtered = files.filter(f => pattern.test(f.name));
+     const filtered = files.filter(f => 
+  pattern.test(f.name) &&
+  /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.name)
+);
+
      if (filtered.length > 0) files = filtered;
    }
 
