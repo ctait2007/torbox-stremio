@@ -242,8 +242,6 @@ res.json({ metas: deduplicated });
 
 app.get('/stream/:type/:id.json', async (req, res) => {
   try {
-    console.log('Stream request:', req.params);
-
     const { type } = req.params;
     const rawId = req.params.id;
     const parts = rawId.split(':');
@@ -271,6 +269,64 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         }
       })
     );
+
+    // Get ALL matching torrents not just first
+    const allMatches = matches.filter(Boolean);
+    if (!allMatches.length) return res.json({ streams: [] });
+
+    let files = [];
+    let matchedTorrent = null;
+
+    if (season !== null && episode !== null) {
+      const seasonStr = String(season).padStart(2, '0');
+      const episodeStr = String(episode).padStart(2, '0');
+      const pattern = new RegExp(`S${seasonStr}E${episodeStr}`, 'i');
+
+      for (const torrent of allMatches) {
+        const filtered = (torrent.files || []).filter(f =>
+          pattern.test(f.name) &&
+          /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+        );
+        if (filtered.length > 0) {
+          files = filtered;
+          matchedTorrent = torrent;
+          break;
+        }
+      }
+
+      if (!files.length) return res.json({ streams: [] });
+    } else {
+      matchedTorrent = allMatches[0];
+      const videoFiles = (matchedTorrent.files || []).filter(f =>
+        /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+      );
+      if (videoFiles.length > 0) {
+        videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
+        files = [videoFiles[0]];
+      }
+    }
+
+    if (!matchedTorrent || !files.length) return res.json({ streams: [] });
+
+    const streams = files.map(file => ({
+      url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${matchedTorrent.id}&file_id=${file.id}&redirect=true`,
+      name: '👑 Library ⚡️',
+      description: formatStreamDescription(
+        file.short_name || file.name || '',
+        cleanTitle(matchedTorrent.name),
+        season,
+        episode,
+        file.size || 0
+      )
+    }));
+
+    res.json({ streams });
+  } catch (err) {
+    console.error(err);
+    res.json({ streams: [] });
+  }
+});
+
 
     // Get ALL matching torrents, not just the first
 const allMatches = matches.filter(Boolean);
