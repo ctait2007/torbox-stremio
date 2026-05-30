@@ -30,6 +30,12 @@ function detectType(name) {
   if (/Complete\s*Collection/i.test(name)) return 'series';
   if (/\(S\d+/i.test(name)) return 'series';
   if (/INTEGRALE/i.test(name)) return 'series';
+  if (/Stagione/i.test(name)) return 'series';     // Italian
+if (/Temporada/i.test(name)) return 'series';    // Spanish/Portuguese
+if (/Staffel/i.test(name)) return 'series';      // German
+if (/Saison/i.test(name)) return 'series';       // French
+if (/Сезон/i.test(name)) return 'series';        // Russian
+if (/COMPLETA|COMPLETO|COMPLETE/i.test(name)) return 'series';
   if (/\bLF[_\s]/i.test(name)) return 'series';
   return 'movie';
 }
@@ -42,11 +48,18 @@ function cleanTitle(name) {
     .replace(/Complete\s*Series.*/gi, '')
     .replace(/Complete\s*Collection.*/gi, '')
     .replace(/INTEGRALE.*/i, '')
+    .replace(/Stagione\s*\d+.*/i, '')    // Italian
+.replace(/Temporada\s*\d+.*/i, '')   // Spanish/Portuguese
+.replace(/Staffel\s*\d+.*/i, '')     // German
+.replace(/Saison\s*\d+.*/i, '')      // French
+.replace(/Сезон\s*\d+.*/i, '')       // Russian
+.replace(/COMPLETA.*/i, '')
+.replace(/COMPLETO.*/i, '')
     .replace(/\bLF[_\s].*/i, '')
     .replace(/S\d{2}(E\d{2})?.*$/i, '')
     .replace(/Season\s*\d+.*/i, '')
     .replace(/\b(19|20)\d{2}\b.*/, '')
-    .replace(/\b(MULTi|MULTI|VFF|VF|VO|VOST|TRUEFRENCH)\b.*/i, '')
+    .replace(/\b(MULTi|MULTI|VFF|VF|VO|VOST|TRUEFRENCH|ITA|ENG|SPA|POR|RUS|RU|RUSENG|JPN|GER|FRE|FRA|DUT|NLD|SWE|NOR|DAN|FIN|POL|CZE|HUN|ROM|TUR|KOR|CHI|ARA|HEB|HIN|THA|VIE|IND|DUBBED|SUBBED|DUAL|MULTI5|MULTI6|MULTISUB)\b.*/i, '')
     .replace(/\b(LF|proper|repack|extended|theatrical|directors.cut)\b.*/i, '')
     .replace(/\b(1080p|720p|2160p|4k|bluray|bdrip|webrip|web-dl|web|hdtv|x264|x265|hevc|aac|dd5|h264|h265|remux|hdlight|10bit|ac3)\b.*/i, '')
     .replace(/[\._]/g, ' ')
@@ -288,7 +301,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
    if (season !== null && episode !== null) {
      const seasonStr = String(season).padStart(2, '0');
      const episodeStr = String(episode).padStart(2, '0');
-     const pattern = new RegExp(`S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}`, 'i');
+     const pattern = new RegExp(`(S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}|${parseInt(season)}[xX]${episodeStr})`, 'i');
 
      for (const torrent of allMatches) {
        const filtered = (torrent.files || []).filter(f =>
