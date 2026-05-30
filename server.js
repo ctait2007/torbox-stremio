@@ -280,7 +280,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     pattern.test(f.name) &&
     /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
   );
-  if (filtered.length > 0) files = filtered;
+  if (filtered.length > 0) {
+  files = filtered;
+} else {
+  return res.json({ streams: [] });
+}
 } else {
   // Movie filter — video files only, pick the largest (main feature)
   const videoFiles = files.filter(f =>
