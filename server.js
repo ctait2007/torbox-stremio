@@ -52,6 +52,8 @@ function cleanTitle(name) {
     .replace(/[\._]/g, ' ')
     .replace(/\s+/g, ' ')
     .replace(/[\s\-\(]+$/, '')  // strip trailing junk
+.replace(/\s*-\s*(the|a|an)\s*$/i, '')  // strip trailing "- The" etc
+.replace(/[\s\-\(]+$/, '')               // strip remaining trailing junk
     .trim();
 }
 
