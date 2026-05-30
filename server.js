@@ -264,30 +264,36 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       })
     );
 
-    const torrent = matches.find(Boolean);
-    console.log('Matched torrent:', torrent ? torrent.name : 'NONE');
-    if (!torrent || !torrent.files?.length) return res.json({ streams: [] });
+    // Get ALL matching torrents, not just the first
+const allMatches = matches.filter(Boolean);
+if (!allMatches.length) return res.json({ streams: [] });
 
-    let files = torrent.files;
-    console.log('Files for episode:', files.map(f => ({ name: f.short_name, mime: f.mimetype })));
+let files = [];
+let matchedTorrent = null;
 
-    if (season !== null && episode !== null) {
-  // TV episode filter
+if (season !== null && episode !== null) {
+  // Search every matching torrent for the specific episode
   const seasonStr = String(season).padStart(2, '0');
   const episodeStr = String(episode).padStart(2, '0');
   const pattern = new RegExp(`S${seasonStr}E${episodeStr}`, 'i');
-  const filtered = files.filter(f =>
-    pattern.test(f.name) &&
-    /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-  );
-  if (filtered.length > 0) {
-  files = filtered;
+
+  for (const torrent of allMatches) {
+    const filtered = (torrent.files || []).filter(f =>
+      pattern.test(f.name) &&
+      /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+    );
+    if (filtered.length > 0) {
+      files = filtered;
+      matchedTorrent = torrent;
+      break;
+    }
+  }
+
+  if (!files.length) return res.json({ streams: [] });
 } else {
-  return res.json({ streams: [] });
-}
-} else {
-  // Movie filter — video files only, pick the largest (main feature)
-  const videoFiles = files.filter(f =>
+  // For movies, use the first matched torrent, pick largest video file
+  matchedTorrent = allMatches[0];
+  const videoFiles = (matchedTorrent.files || []).filter(f =>
     /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
   );
   if (videoFiles.length > 0) {
@@ -295,6 +301,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     files = [videoFiles[0]];
   }
 }
+
+if (!matchedTorrent || !files.length) return res.json({ streams: [] });
 
     const streams = files.map(file => ({
       url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
