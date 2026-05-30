@@ -13,7 +13,7 @@ const cache = {
   imdbId: new Map()
 };
 
-const TORBOX_CACHE_TTL = 5 * 60 * 1000;   // 5 minutes
+const TORBOX_CACHE_TTL = 60 * 60 * 1000;   // 1 hour
 const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
 app.use((req, res, next) => {
