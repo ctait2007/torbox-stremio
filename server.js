@@ -244,89 +244,88 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 });
 
 app.get('/stream/:type/:id.json', async (req, res) => {
-  try {
-    const { type } = req.params;
-    const rawId = req.params.id;
-    const parts = rawId.split(':');
-    const id = parts[0];
-    const season = parts[1] ? parseInt(parts[1]) : null;
-    const episode = parts[2] ? parseInt(parts[2]) : null;
+ try {
+   const { type } = req.params;
+   const rawId = req.params.id;
+   const parts = rawId.split(':');
+   const id = parts[0];
+   const season = parts[1] ? parseInt(parts[1]) : null;
+   const episode = parts[2] ? parseInt(parts[2]) : null;
 
-    const torrents = await getTorboxLibrary();
+   const torrents = await getTorboxLibrary();
 
-    const matches = await Promise.all(
-      torrents.map(async (torrent) => {
-        try {
-          const detectedType = detectType(torrent.name);
-          if (detectedType !== type) return null;
+   const matches = await Promise.all(
+     torrents.map(async (torrent) => {
+       try {
+         const detectedType = detectType(torrent.name);
+         if (detectedType !== type) return null;
 
-          const title = cleanTitle(torrent.name);
-          const year = extractYear(torrent.name);
-          const tmdb = await searchTmdb(title, year, type);
-          if (!tmdb) return null;
-          const imdbId = await getImdbId(tmdb.id, type);
-          if (imdbId !== id) return null;
-          return torrent;
-        } catch (e) {
-          return null;
-        }
-      })
-    );
+         const title = cleanTitle(torrent.name);
+         const year = extractYear(torrent.name);
+         const tmdb = await searchTmdb(title, year, type);
+         if (!tmdb) return null;
+         const imdbId = await getImdbId(tmdb.id, type);
+         if (imdbId !== id) return null;
+         return torrent;
+       } catch (e) {
+         return null;
+       }
+     })
+   );
 
-    const allMatches = matches.filter(Boolean);
-    if (!allMatches.length) return res.json({ streams: [] });
+   const allMatches = matches.filter(Boolean);
+   if (!allMatches.length) return res.json({ streams: [] });
 
-    let files = [];
-    let matchedTorrent = null;
+   // Collect { file, torrent } pairs
+   let pairs = [];
 
-    if (season !== null && episode !== null) {
-      const seasonStr = String(season).padStart(2, '0');
-      const episodeStr = String(episode).padStart(2, '0');
-      const pattern = new RegExp(`S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}`, 'i');
+   if (season !== null && episode !== null) {
+     const seasonStr = String(season).padStart(2, '0');
+     const episodeStr = String(episode).padStart(2, '0');
+     const pattern = new RegExp(`S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}`, 'i');
 
-      for (const torrent of allMatches) {
-        const filtered = (torrent.files || []).filter(f =>
-          pattern.test(f.name) &&
-          /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-        );
-        if (filtered.length > 0) {
-          files = filtered;
-          matchedTorrent = torrent;
-          break;
-        }
-      }
+     for (const torrent of allMatches) {
+       const filtered = (torrent.files || []).filter(f =>
+         pattern.test(f.name) &&
+         /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+       );
+       if (filtered.length > 0) {
+         pairs = filtered.map(f => ({ file: f, torrent }));
+         break;
+       }
+     }
+   } else {
+     // Movies — best file from each matching torrent
+     for (const torrent of allMatches) {
+       const videoFiles = (torrent.files || []).filter(f =>
+         /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+       );
+       if (videoFiles.length > 0) {
+         videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
+         pairs.push({ file: videoFiles[0], torrent });
+       }
+     }
+   }
 
-      if (!files.length) return res.json({ streams: [] });
-    } else {
-      matchedTorrent = allMatches[0];
-      const videoFiles = (matchedTorrent.files || []).filter(f =>
-        /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-      );
-      if (videoFiles.length > 0) {
-        videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
-        files = [videoFiles[0]];
-      }
-    }
+   if (!pairs.length) return res.json({ streams: [] });
 
-    if (!matchedTorrent || !files.length) return res.json({ streams: [] });
+   const streams = pairs.map(({ file, torrent }) => ({
+     url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
+     name: '👑 Library ⚡️',
+     description: formatStreamDescription(
+       file.short_name || file.name || '',
+       cleanTitle(torrent.name),
+       season,
+       episode,
+       file.size || 0
+     )
+   }));
 
-    const streams = files.map(file => ({
-      url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${matchedTorrent.id}&file_id=${file.id}&redirect=true`,
-      name: '👑 Library ⚡️',
-      description: formatStreamDescription(
-        file.short_name || file.name || '',
-        cleanTitle(matchedTorrent.name),
-        season,
-        episode,
-        file.size || 0
-      )
-    }));
-
-    res.json({ streams });
-  } catch (err) {
-    console.error(err);
-    res.json({ streams: [] });
-  }
+   res.json({ streams });
+ } catch (err) {
+   console.error(err);
+   res.json({ streams: [] });
+ }
 });
 
 app.get('/manifest.json', (req, res) => res.json(manifest));
