@@ -272,15 +272,25 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     console.log('Files for episode:', files.map(f => ({ name: f.short_name, mime: f.mimetype })));
 
     if (season !== null && episode !== null) {
-      const seasonStr = String(season).padStart(2, '0');
-      const episodeStr = String(episode).padStart(2, '0');
-      const pattern = new RegExp(`S${seasonStr}E${episodeStr}`, 'i');
-      const filtered = files.filter(f =>
-        pattern.test(f.name) &&
-        /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-      );
-      if (filtered.length > 0) files = filtered;
-    }
+  // TV episode filter
+  const seasonStr = String(season).padStart(2, '0');
+  const episodeStr = String(episode).padStart(2, '0');
+  const pattern = new RegExp(`S${seasonStr}E${episodeStr}`, 'i');
+  const filtered = files.filter(f =>
+    pattern.test(f.name) &&
+    /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+  );
+  if (filtered.length > 0) files = filtered;
+} else {
+  // Movie filter — video files only, pick the largest (main feature)
+  const videoFiles = files.filter(f =>
+    /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+  );
+  if (videoFiles.length > 0) {
+    videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
+    files = [videoFiles[0]];
+  }
+}
 
     const streams = files.map(file => ({
       url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
