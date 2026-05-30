@@ -332,4 +332,10 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 app.get('/manifest.json', (req, res) => res.json(manifest));
 app.get('/', (req, res) => res.json(manifest));
 
+app.get('/debug-files/:id', async (req, res) => {
+  const torrents = await getTorboxLibrary();
+  const torrent = torrents.find(t => String(t.id) === req.params.id);
+  res.json(torrent || { error: 'not found' });
+});
+
 app.listen(3000, () => console.log('TorBox addon running'));
