@@ -67,13 +67,18 @@ function normalizeTitle(str) {
 }
 
 function formatStreamDescription(filename, title, season, episode, filesize) {
-  const res = filename.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] || null;
-  const quality = filename.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] || null;
-  const encode = filename.match(/\b(x264|x265|h264|h265|hevc|avc)\b/i)?.[1] || null;
-  const audio = filename.match(/\b(aac|ac3|dts|atmos|truehd|dd5|eac3|flac)\b/i)?.[1] || null;
-  const hdr = filename.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] || null;
-  const bitDepth = filename.match(/\b(10bit|8bit)\b/i)?.[1] || null;
-  const container = filename.match(/\.(mkv|mp4|avi|mov|wmv)$/i)?.[1] || null;
+  const res = filename.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] ||
+            title.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] || null;
+const quality = filename.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] ||
+                title.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] || null;
+const encode = filename.match(/\b(x264|x265|h264|h265|hevc|avc)\b/i)?.[1] ||
+               title.match(/\b(x264|x265|h264|h265|hevc|avc)\b/i)?.[1] || null;
+const audio = filename.match(/\b(aac|ac3|dts|atmos|truehd|dd5|eac3|flac)\b/i)?.[1] ||
+              title.match(/\b(aac|ac3|dts|atmos|truehd|dd5|eac3|flac)\b/i)?.[1] || null;
+const hdr = filename.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] ||
+            title.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] || null;
+const bitDepth = filename.match(/\b(10bit|8bit)\b/i)?.[1] ||
+                 title.match(/\b(10bit|8bit)\b/i)?.[1] || null;
 
   const resIcon = res ? ({
     '2160p': '⭐️ 4K',
