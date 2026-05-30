@@ -343,4 +343,12 @@ app.get('/debug-files/:id', async (req, res) => {
   res.json(torrent || { error: 'not found' });
 });
 
+app.get('/refresh', (req, res) => {
+  cache.torboxLibrary = null;
+  cache.torboxLibraryExpiry = 0;
+  cache.tmdb.clear();
+  cache.imdbId.clear();
+  res.json({ success: true, message: 'Cache cleared' });
+});
+
 app.listen(3000, () => console.log('TorBox addon running'));
