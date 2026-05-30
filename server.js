@@ -27,6 +27,7 @@ function detectType(name) {
   if (/Season\s*\d+/i.test(name)) return 'series';
   if (/\d+x\d+/i.test(name)) return 'series';
   if (/Complete\s*Series/i.test(name)) return 'series';
+  if (/Complete\s*Collection/i.test(name)) return 'series';
   if (/\(S\d+/i.test(name)) return 'series';
   if (/INTEGRALE/i.test(name)) return 'series';
   if (/\bLF[_\s]/i.test(name)) return 'series';
@@ -39,6 +40,7 @@ function cleanTitle(name) {
     .replace(/\[.*?\]/g, '')
     .replace(/\(S\d+.*?\)/gi, '')
     .replace(/Complete\s*Series.*/gi, '')
+    .replace(/Complete\s*Collection.*/gi, '')
     .replace(/INTEGRALE.*/i, '')
     .replace(/\bLF[_\s].*/i, '')
     .replace(/S\d{2}(E\d{2})?.*$/i, '')
@@ -49,6 +51,7 @@ function cleanTitle(name) {
     .replace(/\b(1080p|720p|2160p|4k|bluray|bdrip|webrip|web-dl|web|hdtv|x264|x265|hevc|aac|dd5|h264|h265|remux|hdlight|10bit|ac3)\b.*/i, '')
     .replace(/[\._]/g, ' ')
     .replace(/\s+/g, ' ')
+    .replace(/[\s\-\(]+$/, '')  // strip trailing junk
     .trim();
 }
 
