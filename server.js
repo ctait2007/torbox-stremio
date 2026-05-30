@@ -79,6 +79,7 @@ const hdr = filename.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] ||
             title.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] || null;
 const bitDepth = filename.match(/\b(10bit|8bit)\b/i)?.[1] ||
                  title.match(/\b(10bit|8bit)\b/i)?.[1] || null;
+                const container = filename.match(/\.(mkv|mp4|avi|mov|wmv)$/i)?.[1] || null;
 
   const resIcon = res ? ({
     '2160p': '⭐️ 4K',
