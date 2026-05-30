@@ -225,7 +225,15 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
       })
     );
 
-    res.json({ metas: results.filter(Boolean) });
+    // Deduplicate by IMDB ID — keep first occurrence of each
+const seen = new Set();
+const deduplicated = results.filter(Boolean).filter(meta => {
+  if (seen.has(meta.id)) return false;
+  seen.add(meta.id);
+  return true;
+});
+res.json({ metas: deduplicated });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ metas: [] });
