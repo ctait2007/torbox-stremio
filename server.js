@@ -5,7 +5,6 @@ const manifest = require('./manifest.json');
 const TORBOX_API_KEY = process.env.TORBOX_API_KEY;
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
-// Cache
 const cache = {
   torboxLibrary: null,
   torboxLibraryExpiry: 0,
@@ -13,8 +12,8 @@ const cache = {
   imdbId: new Map()
 };
 
-const TORBOX_CACHE_TTL = 60 * 60 * 1000;   // 1 hour
-const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const TORBOX_CACHE_TTL = 60 * 60 * 1000;
+const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000;
 
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -146,15 +145,16 @@ async function searchTmdb(title, year, type, retries = 3) {
         });
       }
 
-      cache.tmdb.set(cacheKey, { value: match || null, expiry: Date.now() + TMDB_CACHE_TTL });
-      return match || null;
+      if (match) {
+        cache.tmdb.set(cacheKey, { value: match, expiry: Date.now() + TMDB_CACHE_TTL });
+        return match;
+      }
     } catch (e) {
       console.error(`TMDB search attempt ${i + 1} failed for "${title}":`, e.message);
     }
     if (i < retries - 1) await new Promise(r => setTimeout(r, 500));
   }
 
-  cache.tmdb.set(cacheKey, { value: null, expiry: Date.now() + TMDB_CACHE_TTL });
   return null;
 }
 
@@ -180,7 +180,6 @@ async function getImdbId(tmdbId, type, retries = 3) {
     if (i < retries - 1) await new Promise(r => setTimeout(r, 500));
   }
 
-  cache.imdbId.set(cacheKey, { value: null, expiry: Date.now() + TMDB_CACHE_TTL });
   return null;
 }
 
@@ -225,15 +224,14 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
       })
     );
 
-    // Deduplicate by IMDB ID — keep first occurrence of each
-const seen = new Set();
-const deduplicated = results.filter(Boolean).filter(meta => {
-  if (seen.has(meta.id)) return false;
-  seen.add(meta.id);
-  return true;
-});
-res.json({ metas: deduplicated });
+    const seen = new Set();
+    const deduplicated = results.filter(Boolean).filter(meta => {
+      if (seen.has(meta.id)) return false;
+      seen.add(meta.id);
+      return true;
+    });
 
+    res.json({ metas: deduplicated });
   } catch (err) {
     console.error(err);
     res.status(500).json({ metas: [] });
@@ -270,7 +268,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       })
     );
 
-    // Get ALL matching torrents not just first
     const allMatches = matches.filter(Boolean);
     if (!allMatches.length) return res.json({ streams: [] });
 
@@ -327,112 +324,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   }
 });
 
-
-    // Get ALL matching torrents, not just the first
-const allMatches = matches.filter(Boolean);
-if (!allMatches.length) return res.json({ streams: [] });
-
-let files = [];
-let matchedTorrent = null;
-
-if (season !== null && episode !== null) {
-  // Search every matching torrent for the specific episode
-  const seasonStr = String(season).padStart(2, '0');
-  const episodeStr = String(episode).padStart(2, '0');
-  const pattern = new RegExp(`S${seasonStr}E${episodeStr}`, 'i');
-
-  for (const torrent of allMatches) {
-    const filtered = (torrent.files || []).filter(f =>
-      pattern.test(f.name) &&
-      /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-    );
-    if (filtered.length > 0) {
-      files = filtered;
-      matchedTorrent = torrent;
-      break;
-    }
-  }
-
-  if (!files.length) return res.json({ streams: [] });
-} else {
-  // For movies, use the first matched torrent, pick largest video file
-  matchedTorrent = allMatches[0];
-  const videoFiles = (matchedTorrent.files || []).filter(f =>
-    /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-  );
-  if (videoFiles.length > 0) {
-    videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
-    files = [videoFiles[0]];
-  }
-}
-
-if (!matchedTorrent || !files.length) return res.json({ streams: [] });
-
-    const streams = files.map(file => ({
-      url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${TORBOX_API_KEY}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
-      name: '👑 Library ⚡️',
-      description: formatStreamDescription(
-        file.short_name || file.name || '',
-        cleanTitle(torrent.name),
-        season,
-        episode,
-        file.size || 0
-      )
-    }));
-
-    res.json({ streams });
-  } catch (err) {
-    console.error(err);
-    res.json({ streams: [] });
-  }
-});
-
 app.get('/manifest.json', (req, res) => res.json(manifest));
 app.get('/', (req, res) => res.json(manifest));
-
-app.get('/debug', async (req, res) => {
-  const torrents = await getTorboxLibrary();
-  const debug = torrents.map(t => ({
-    original: t.name,
-    cleaned: cleanTitle(t.name),
-    detectedType: detectType(t.name)
-  }));
-  res.json(debug);
-});
-
-app.get('/debug-stream/:type/:id', async (req, res) => {
-  const { type, id } = req.params;
-  const torrents = await getTorboxLibrary();
-
-  const results = await Promise.all(
-    torrents.map(async (torrent) => {
-      try {
-        const detectedType = detectType(torrent.name);
-        const title = cleanTitle(torrent.name);
-        const year = extractYear(torrent.name);
-        const tmdb = await searchTmdb(title, year, type);
-        const imdbId = tmdb ? await getImdbId(tmdb.id, type) : null;
-        return {
-          torrent: torrent.name,
-          detectedType,
-          title,
-          imdbId,
-          matchesRequested: imdbId === id,
-          fileCount: torrent.files?.length || 0
-        };
-      } catch (e) {
-        return { torrent: torrent.name, error: e.message };
-      }
-    })
-  );
-
-  res.json(results);
-});
-
-app.get('/debug-files/:id', async (req, res) => {
-  const torrents = await getTorboxLibrary();
-  const torrent = torrents.find(t => String(t.id) === req.params.id);
-  res.json(torrent || { error: 'not found' });
-});
 
 app.listen(3000, () => console.log('TorBox addon running'));
