@@ -282,7 +282,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     if (season !== null && episode !== null) {
       const seasonStr = String(season).padStart(2, '0');
       const episodeStr = String(episode).padStart(2, '0');
-      const pattern = new RegExp(`S${seasonStr}E${episodeStr}`, 'i');
+      const pattern = new RegExp(`S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}`, 'i');
 
       for (const torrent of allMatches) {
         const filtered = (torrent.files || []).filter(f =>
