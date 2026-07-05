@@ -7,7 +7,7 @@
   "background": "https://image.tmdb.org/t/p/original/jf7AWfBrGROEd8dOQtLGmOYIRuQ.jpg",
   "contactEmail": "your@email.com",
   "resources": ["catalog", "stream"],
-  "types": ["movie", "series"],
+  "types": ["movie", "series", "anime"],
   "idPrefixes": ["tt"],
   "catalogs": [
     {
@@ -24,6 +24,16 @@
       "id": "torbox-series",
       "type": "series",
       "name": "TorBox Series",
+      "extra": [
+        { "name": "search", "isRequired": false },
+        { "name": "skip", "isRequired": false }
+      ],
+      "extraSupported": ["search", "skip"]
+    },
+        {
+      "id": "torbox-anime",
+      "type": "anime",
+      "name": "TorBox Anime",
       "extra": [
         { "name": "search", "isRequired": false },
         { "name": "skip", "isRequired": false }
