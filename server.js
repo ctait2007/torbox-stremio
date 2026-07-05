@@ -4,9 +4,7 @@ const baseManifest = require('./manifest.json');
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
-// Cache per API key
 const caches = new Map();
-
 const TORBOX_CACHE_TTL = 60 * 60 * 1000;
 const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000;
 
@@ -121,6 +119,26 @@ function detectType(name) {
   return 'movie';
 }
 
+async function resolveSeriesType(tmdbId, apiKey) {
+  const cache = getCache(apiKey);
+  const cacheKey = `keywords:${tmdbId}`;
+  const cached = cache.tmdb.get(cacheKey);
+  if (cached && Date.now() < cached.expiry) return cached.value;
+
+  try {
+    const res = await fetch(
+      `https://api.themoviedb.org/3/tv/${tmdbId}/keywords?api_key=${TMDB_API_KEY}`
+    );
+    const json = await res.json();
+    const isAnime = (json.results || []).some(k => k.id === 210024);
+    const resolved = isAnime ? 'anime' : 'series';
+    cache.tmdb.set(cacheKey, { value: resolved, expiry: Date.now() + TMDB_CACHE_TTL });
+    return resolved;
+  } catch (e) {
+    return 'series';
+  }
+}
+
 function cleanTitle(name) {
   return name
     .replace(/\.(mkv|mp4|avi|mov|wmv)$/i, '')
@@ -200,9 +218,7 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
 async function getTorboxLibrary(apiKey) {
   const cache = getCache(apiKey);
   const now = Date.now();
-  if (cache.torboxLibrary && now < cache.torboxLibraryExpiry) {
-    return cache.torboxLibrary;
-  }
+  if (cache.torboxLibrary && now < cache.torboxLibraryExpiry) return cache.torboxLibrary;
   const res = await fetch('https://api.torbox.app/v1/api/torrents/mylist', {
     headers: { Authorization: `Bearer ${apiKey}` }
   });
@@ -218,13 +234,14 @@ async function searchTmdb(title, year, type, apiKey, retries = 3) {
   const cached = cache.tmdb.get(cacheKey);
   if (cached && Date.now() < cached.expiry) return cached.value;
 
+  const tmdbType = type === 'movie' ? 'movie' : 'tv';
+
   for (let i = 0; i < retries; i++) {
     try {
       const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`;
       const res = await fetch(url);
       const json = await res.json();
       const normalizedSearch = normalizeTitle(title);
-      const tmdbType = type === 'series' ? 'tv' : 'movie';
 
       let match = json.results?.find(r => {
         if (r.media_type !== tmdbType) return false;
@@ -298,18 +315,28 @@ app.get('/:apiKey/catalog/:type/:id.json', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const { apiKey, type } = req.params;
+    const torrentType = type === 'anime' ? 'series' : type;
     const torrents = await getTorboxLibrary(apiKey);
 
     const results = await Promise.all(
       torrents.map(async (torrent) => {
         try {
-          if (detectType(torrent.name) !== type) return null;
+          if (detectType(torrent.name) !== torrentType) return null;
+
           const title = cleanTitle(torrent.name);
           const year = extractYear(torrent.name);
-          const tmdb = await searchTmdb(title, year, type, apiKey);
+          const tmdb = await searchTmdb(title, year, torrentType, apiKey);
           if (!tmdb) return null;
-          const imdbId = await getImdbId(tmdb.id, type, apiKey);
+
+          // Use TMDB anime keyword to distinguish series from anime
+          if (torrentType === 'series') {
+            const resolvedType = await resolveSeriesType(tmdb.id, apiKey);
+            if (resolvedType !== type) return null;
+          }
+
+          const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
           if (!imdbId) return null;
+
           return toMeta(tmdb, imdbId, torrent.id, type);
         } catch (e) { return null; }
       })
@@ -333,6 +360,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const { apiKey, type } = req.params;
+    const torrentType = type === 'anime' ? 'series' : type;
     const rawId = req.params.id;
     const parts = rawId.split(':');
     const id = parts[0];
@@ -344,12 +372,12 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     const matches = await Promise.all(
       torrents.map(async (torrent) => {
         try {
-          if (detectType(torrent.name) !== type) return null;
+          if (detectType(torrent.name) !== torrentType) return null;
           const title = cleanTitle(torrent.name);
           const year = extractYear(torrent.name);
-          const tmdb = await searchTmdb(title, year, type, apiKey);
+          const tmdb = await searchTmdb(title, year, torrentType, apiKey);
           if (!tmdb) return null;
-          const imdbId = await getImdbId(tmdb.id, type, apiKey);
+          const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
           if (imdbId !== id) return null;
           return torrent;
         } catch (e) { return null; }
@@ -411,14 +439,10 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
 app.get('/:apiKey/refresh', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   const { apiKey } = req.params;
-  if (caches.has(apiKey)) {
-    caches.delete(apiKey);
-  }
+  if (caches.has(apiKey)) caches.delete(apiKey);
   res.json({ success: true, message: 'Cache cleared' });
 });
 
-// Legacy routes for backwards compatibility with your existing install
-app.get('/manifest.json', (req, res) => res.redirect('/configure'));
 app.get('/configure', (req, res) => res.redirect('/'));
 
 app.listen(3000, () => console.log('TorBox addon running'));
