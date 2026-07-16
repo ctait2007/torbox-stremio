@@ -455,10 +455,10 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
           pattern.test(f.name) &&
           /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
         );
-        if (filtered.length > 0) {
-          pairs = filtered.map(f => ({ file: f, torrent }));
-          break;
+                if (filtered.length > 0) {
+          filtered.forEach(f => pairs.push({ file: f, torrent }));
         }
+
       }
     } else {
       for (const torrent of allMatches) {
