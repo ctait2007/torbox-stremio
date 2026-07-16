@@ -124,7 +124,6 @@ async function resolveSeriesType(tmdbId, apiKey) {
   const cacheKey = `keywords:${tmdbId}`;
   const cached = cache.tmdb.get(cacheKey);
   if (cached && Date.now() < cached.expiry) return cached.value;
-
   try {
     const res = await fetch(
       `https://api.themoviedb.org/3/tv/${tmdbId}/keywords?api_key=${TMDB_API_KEY}`
@@ -233,16 +232,13 @@ async function searchTmdb(title, year, type, apiKey, retries = 3) {
   const cacheKey = `${title}:${type}`;
   const cached = cache.tmdb.get(cacheKey);
   if (cached && Date.now() < cached.expiry) return cached.value;
-
   const tmdbType = type === 'movie' ? 'movie' : 'tv';
-
   for (let i = 0; i < retries; i++) {
     try {
       const url = `https://api.themoviedb.org/3/search/multi?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`;
       const res = await fetch(url);
       const json = await res.json();
       const normalizedSearch = normalizeTitle(title);
-
       let match = json.results?.find(r => {
         if (r.media_type !== tmdbType) return false;
         return normalizeTitle(r.title || r.name || '') === normalizedSearch;
@@ -270,7 +266,6 @@ async function getImdbId(tmdbId, type, apiKey, retries = 3) {
   const cacheKey = `${tmdbId}:${type}`;
   const cached = cache.imdbId.get(cacheKey);
   if (cached && Date.now() < cached.expiry) return cached.value;
-
   const endpoint = type === 'movie' ? 'movie' : 'tv';
   for (let i = 0; i < retries; i++) {
     try {
@@ -322,22 +317,20 @@ app.get('/:apiKey/catalog/:type/:id.json', async (req, res) => {
       torrents.map(async (torrent) => {
         try {
           if (detectType(torrent.name) !== torrentType) return null;
-
           const title = cleanTitle(torrent.name);
           const year = extractYear(torrent.name);
           const tmdb = await searchTmdb(title, year, torrentType, apiKey);
           if (!tmdb) return null;
-
-          // Use TMDB anime keyword to distinguish series from anime
           if (torrentType === 'series') {
             const resolvedType = await resolveSeriesType(tmdb.id, apiKey);
             if (resolvedType !== type) return null;
           }
-
           const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
           if (!imdbId) return null;
-
-          return toMeta(tmdb, imdbId, torrent.id, type);
+          // Return as series so metadata addons like AIO can resolve the show.
+          // The anime catalog URL is enough to place it in the anime section.
+          const metaType = type === 'anime' ? 'series' : type;
+          return toMeta(tmdb, imdbId, torrent.id, metaType);
         } catch (e) { return null; }
       })
     );
@@ -348,11 +341,75 @@ app.get('/:apiKey/catalog/:type/:id.json', async (req, res) => {
       seen.add(meta.id);
       return true;
     });
-
     res.json({ metas: deduplicated });
   } catch (err) {
     console.error(err);
     res.status(500).json({ metas: [] });
+  }
+});
+
+// Meta handler — anime only, Cinemeta handles movie and series
+app.get('/:apiKey/meta/:type/:id.json', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  try {
+    const { apiKey, type, id } = req.params;
+    if (type !== 'anime') return res.json({ meta: null });
+
+    // Find TMDB entry from IMDB ID
+    const findRes = await fetch(
+      `https://api.themoviedb.org/3/find/${id}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
+    );
+    const findData = await findRes.json();
+    const tvResults = findData.tv_results || [];
+    if (!tvResults.length) return res.json({ meta: null });
+
+    const tmdbId = tvResults[0].id;
+
+    // Get full show details including seasons
+    const showRes = await fetch(
+      `https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`
+    );
+    const show = await showRes.json();
+
+    // Build season videos for the meta page
+    const videos = [];
+    for (const season of (show.seasons || [])) {
+      if (season.season_number === 0) continue;
+      const seasonRes = await fetch(
+        `https://api.themoviedb.org/3/tv/${tmdbId}/season/${season.season_number}?api_key=${TMDB_API_KEY}`
+      );
+      const seasonData = await seasonRes.json();
+      for (const ep of (seasonData.episodes || [])) {
+        videos.push({
+          id: `${id}:${season.season_number}:${ep.episode_number}`,
+          title: ep.name || `Episode ${ep.episode_number}`,
+          season: season.season_number,
+          episode: ep.episode_number,
+          overview: ep.overview || '',
+          thumbnail: ep.still_path
+            ? `https://image.tmdb.org/t/p/w300${ep.still_path}`
+            : null,
+          released: ep.air_date ? new Date(ep.air_date).toISOString() : null
+        });
+      }
+    }
+
+    const meta = {
+      id,
+      type,
+      name: show.name,
+      poster: show.poster_path ? `https://image.tmdb.org/t/p/w500${show.poster_path}` : null,
+      background: show.backdrop_path ? `https://image.tmdb.org/t/p/original${show.backdrop_path}` : null,
+      description: show.overview || '',
+      releaseInfo: (show.first_air_date || '').slice(0, 4),
+      imdbRating: show.vote_average?.toFixed(1),
+      videos
+    };
+
+    res.json({ meta });
+  } catch (err) {
+    console.error(err);
+    res.json({ meta: null });
   }
 });
 
@@ -393,7 +450,6 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       const seasonStr = String(season).padStart(2, '0');
       const episodeStr = String(episode).padStart(2, '0');
       const pattern = new RegExp(`(S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}|${parseInt(season)}[xX]${episodeStr})`, 'i');
-
       for (const torrent of allMatches) {
         const filtered = (torrent.files || []).filter(f =>
           pattern.test(f.name) &&
