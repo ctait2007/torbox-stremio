@@ -15,30 +15,27 @@
       "type": "movie",
       "name": "TorBox Movies",
       "extra": [
-        { "name": "search", "isRequired": false },
         { "name": "skip", "isRequired": false }
       ],
-      "extraSupported": ["search", "skip"]
+      "extraSupported": ["skip"]
     },
     {
       "id": "torbox-series",
       "type": "series",
       "name": "TorBox Series",
       "extra": [
-        { "name": "search", "isRequired": false },
         { "name": "skip", "isRequired": false }
       ],
-      "extraSupported": ["search", "skip"]
+      "extraSupported": ["skip"]
     },
         {
       "id": "torbox-anime",
       "type": "anime",
       "name": "TorBox Anime",
       "extra": [
-        { "name": "search", "isRequired": false },
         { "name": "skip", "isRequired": false }
       ],
-      "extraSupported": ["search", "skip"]
+      "extraSupported": ["skip"]
     }
   ],
   "behaviorHints": {
