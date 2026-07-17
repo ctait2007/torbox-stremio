@@ -13,7 +13,7 @@
     {
       "id": "torbox-movies",
       "type": "movie",
-      "name": "TorBox Movies",
+      "name": "TorBox Library",
       "extra": [
         { "name": "skip", "isRequired": false }
       ],
@@ -22,7 +22,7 @@
     {
       "id": "torbox-series",
       "type": "series",
-      "name": "TorBox Series",
+      "name": "TorBox Library",
       "extra": [
         { "name": "skip", "isRequired": false }
       ],
@@ -31,7 +31,7 @@
         {
       "id": "torbox-anime",
       "type": "anime",
-      "name": "TorBox Anime",
+      "name": "TorBox Library",
       "extra": [
         { "name": "skip", "isRequired": false }
       ],
