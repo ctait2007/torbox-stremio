@@ -100,27 +100,52 @@ app.get('/', (req, res) => {
 
 // ── Type detection ────────────────────────────────────────────────────────────
 
-function detectType(name) {
+function detectTypeFromName(rawName) {
   // Normalize dot/underscore separators to spaces first — release names like
   // "Season.4" or "Complete.Series" otherwise never match \s*-based patterns,
   // since \s only matches actual whitespace, not literal dots.
-  const normalized = name.replace(/[\._]/g, ' ');
-  if (/\bS\d{1,2}E\d{1,2}\b/i.test(normalized)) return 'series';
-  if (/\bS\d{1,2}\b/i.test(normalized)) return 'series';
-  if (/Season\s*\d+/i.test(normalized)) return 'series';
-  if (/Stagione\s*\d+/i.test(normalized)) return 'series';
-  if (/Temporada\s*\d+/i.test(normalized)) return 'series';
-  if (/Staffel\s*\d+/i.test(normalized)) return 'series';
-  if (/Saison\s*\d+/i.test(normalized)) return 'series';
-  if (/Сезон\s*\d+/i.test(normalized)) return 'series';
-  if (/\d+x\d+/i.test(normalized)) return 'series';
-  if (/Complete\s*Series/i.test(normalized)) return 'series';
-  if (/Complete\s*Collection/i.test(normalized)) return 'series';
-  if (/Complete\s*Season/i.test(normalized)) return 'series';
-  if (/\(S\d+/i.test(normalized)) return 'series';
-  if (/INTEGRALE/i.test(normalized)) return 'series';
-  if (/COMPLETA|COMPLETO/i.test(normalized)) return 'series';
-  if (/\bLF[_\s]/i.test(normalized)) return 'series';
+  const name = rawName.replace(/[\._]/g, ' ');
+  if (/\bS\d{1,2}E\d{1,2}\b/i.test(name)) return 'series';
+  if (/\bS\d{1,2}\b/i.test(name)) return 'series';
+  if (/Season\s*\d+/i.test(name)) return 'series';
+  if (/Stagione\s*\d+/i.test(name)) return 'series';
+  if (/Temporada\s*\d+/i.test(name)) return 'series';
+  if (/Staffel\s*\d+/i.test(name)) return 'series';
+  if (/Saison\s*\d+/i.test(name)) return 'series';
+  if (/Сезон\s*\d+/i.test(name)) return 'series';
+  if (/Sezon\s*\d+/i.test(name)) return 'series';      // Polish / Turkish
+  if (/Seizoen\s*\d+/i.test(name)) return 'series';     // Dutch
+  if (/Séria\s*\d+/i.test(name)) return 'series';       // Slovak
+  if (/Série\s*\d+/i.test(name)) return 'series';       // Czech
+  if (/Évad\s*\d+/i.test(name)) return 'series';        // Hungarian
+  if (/\d+x\d+/i.test(name)) return 'series';
+  if (/Complete\s*Series/i.test(name)) return 'series';
+  if (/Complete\s*Collection/i.test(name)) return 'series';
+  if (/Complete\s*Season/i.test(name)) return 'series';
+  if (/\(S\d+/i.test(name)) return 'series';
+  if (/INTEGRALE/i.test(name)) return 'series';
+  if (/COMPLETA|COMPLETO/i.test(name)) return 'series';
+  if (/\bLF[_\s]/i.test(name)) return 'series';
+  return 'movie';
+}
+
+// Language-independent fallback: rather than trying to enumerate every
+// language's word for "season" forever, check whether multiple files INSIDE
+// the torrent follow an episode-numbering convention (S01E01, 1x01). Episode
+// numbering is used almost universally across release groups regardless of
+// what language the outer torrent name uses for "Season" — so this catches
+// gaps in the name-based word list without needing to guess every language.
+function looksLikeSeriesFromFiles(files) {
+  if (!files || !files.length) return false;
+  const episodePattern = /\bS\d{1,2}[\s\-\._]*E\d{1,2}\b|\b\d{1,2}x\d{1,2}\b/i;
+  const matches = files.filter(f => episodePattern.test(f.name || f.short_name || ''));
+  return matches.length >= 2;
+}
+
+function detectType(torrent) {
+  const nameGuess = detectTypeFromName(torrent.name);
+  if (nameGuess === 'series') return 'series';
+  if (looksLikeSeriesFromFiles(torrent.files)) return 'series';
   return 'movie';
 }
 
@@ -170,6 +195,11 @@ const JUNK_PATTERNS = [
   { pattern: /\bStaffel\s*\d+/i, minIndex: 0 },
   { pattern: /\bSaison\s*\d+/i, minIndex: 0 },
   { pattern: /\bСезон\s*\d+/i, minIndex: 0 },
+  { pattern: /\bSezon\s*\d+/i, minIndex: 0 },
+  { pattern: /\bSeizoen\s*\d+/i, minIndex: 0 },
+  { pattern: /\bSéria\s*\d+/i, minIndex: 0 },
+  { pattern: /\bSérie\s*\d+/i, minIndex: 0 },
+  { pattern: /\bÉvad\s*\d+/i, minIndex: 0 },
   { pattern: /\bComplete\s*Series\b/i, minIndex: 0 },
   { pattern: /\bComplete\s*Collection\b/i, minIndex: 0 },
   { pattern: /\bINTEGRALE\b/i, minIndex: 0 },
@@ -217,8 +247,12 @@ function wordsOf(str) {
 
 // ── TMDB matching cascade ───────────────────────────────────────────────────
 // Tries progressively looser matching strategies instead of requiring one
-// exact match. Falls through: exact → ignore leading article → pre-colon/dash
-// portion → fuzzy word overlap (with a year-proximity bonus) → single result.
+// exact match: exact → ignore leading article → pre-colon/dash portion →
+// fuzzy word overlap (with a year-proximity adjustment). There is NO
+// "single result found, so trust it" shortcut — a lone TMDB hit is not
+// proof of a correct match. A wrong match is worse than no match at all,
+// since it silently shows the wrong piece of content; every result set,
+// however small, has to clear the same similarity bar.
 
 function pickBestMatch(results, title, year) {
   if (!results.length) return null;
@@ -247,18 +281,21 @@ function pickBestMatch(results, title, year) {
       if (!candidateWords.length) continue;
       const overlap = searchWords.filter(w => candidateWords.includes(w)).length;
       const score = overlap / Math.max(searchWords.length, candidateWords.length);
-      let yearBonus = 0;
+      let yearAdjustment = 0;
       if (year) {
         const rYear = parseInt((r.release_date || r.first_air_date || '').slice(0, 4));
-        if (rYear && Math.abs(rYear - year) <= 1) yearBonus = 0.15;
+        if (rYear) {
+          const diff = Math.abs(rYear - year);
+          if (diff <= 1) yearAdjustment = 0.15;
+          else if (diff > 3) yearAdjustment = -0.3; // penalize, don't just fail to reward
+        }
       }
-      const total = score + yearBonus;
+      const total = score + yearAdjustment;
       if (total > bestScore) { bestScore = total; best = r; }
     }
     if (best && bestScore >= 0.6) return best;
   }
 
-  if (results.length === 1) return results[0];
   return null;
 }
 
@@ -411,7 +448,7 @@ app.get('/:apiKey/catalog/:type/:id.json', async (req, res) => {
     const results = await Promise.all(
       torrents.map(async (torrent) => {
         try {
-          if (detectType(torrent.name) !== torrentType) return null;
+          if (detectType(torrent) !== torrentType) return null;
 
           const title = cleanTitle(torrent.name);
           const year = extractYear(torrent.name);
@@ -464,7 +501,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     const matches = await Promise.all(
       torrents.map(async (torrent) => {
         try {
-          if (detectType(torrent.name) !== torrentType) return null;
+          if (detectType(torrent) !== torrentType) return null;
           const title = cleanTitle(torrent.name);
           const year = extractYear(torrent.name);
           const tmdb = await searchTmdb(title, year, torrentType, apiKey);
@@ -538,7 +575,7 @@ app.get('/:apiKey/debug/:type', async (req, res) => {
 
     const results = await Promise.all(
       torrents.map(async (torrent) => {
-        const detected = detectType(torrent.name);
+        const detected = detectType(torrent);
         if (detected !== torrentType) {
           return { torrent: torrent.name, detectedType: detected, issue: `detected as ${detected}, not ${torrentType}` };
         }
