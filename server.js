@@ -101,21 +101,26 @@ app.get('/', (req, res) => {
 // ── Type detection ────────────────────────────────────────────────────────────
 
 function detectType(name) {
-  if (/S\d{2}E\d{2}/i.test(name)) return 'series';
-  if (/S\d{2}\b/i.test(name)) return 'series';
-  if (/Season\s*\d+/i.test(name)) return 'series';
-  if (/Stagione\s*\d+/i.test(name)) return 'series';
-  if (/Temporada\s*\d+/i.test(name)) return 'series';
-  if (/Staffel\s*\d+/i.test(name)) return 'series';
-  if (/Saison\s*\d+/i.test(name)) return 'series';
-  if (/Сезон\s*\d+/i.test(name)) return 'series';
-  if (/\d+x\d+/i.test(name)) return 'series';
-  if (/Complete\s*Series/i.test(name)) return 'series';
-  if (/Complete\s*Collection/i.test(name)) return 'series';
-  if (/\(S\d+/i.test(name)) return 'series';
-  if (/INTEGRALE/i.test(name)) return 'series';
-  if (/COMPLETA|COMPLETO/i.test(name)) return 'series';
-  if (/\bLF[_\s]/i.test(name)) return 'series';
+  // Normalize dot/underscore separators to spaces first — release names like
+  // "Season.4" or "Complete.Series" otherwise never match \s*-based patterns,
+  // since \s only matches actual whitespace, not literal dots.
+  const normalized = name.replace(/[\._]/g, ' ');
+  if (/\bS\d{1,2}E\d{1,2}\b/i.test(normalized)) return 'series';
+  if (/\bS\d{1,2}\b/i.test(normalized)) return 'series';
+  if (/Season\s*\d+/i.test(normalized)) return 'series';
+  if (/Stagione\s*\d+/i.test(normalized)) return 'series';
+  if (/Temporada\s*\d+/i.test(normalized)) return 'series';
+  if (/Staffel\s*\d+/i.test(normalized)) return 'series';
+  if (/Saison\s*\d+/i.test(normalized)) return 'series';
+  if (/Сезон\s*\d+/i.test(normalized)) return 'series';
+  if (/\d+x\d+/i.test(normalized)) return 'series';
+  if (/Complete\s*Series/i.test(normalized)) return 'series';
+  if (/Complete\s*Collection/i.test(normalized)) return 'series';
+  if (/Complete\s*Season/i.test(normalized)) return 'series';
+  if (/\(S\d+/i.test(normalized)) return 'series';
+  if (/INTEGRALE/i.test(normalized)) return 'series';
+  if (/COMPLETA|COMPLETO/i.test(normalized)) return 'series';
+  if (/\bLF[_\s]/i.test(normalized)) return 'series';
   return 'movie';
 }
 
@@ -158,6 +163,7 @@ function firstMatchIndex(str, pattern, minIndex) {
 const JUNK_PATTERNS = [
   { pattern: /\bS\d{1,2}(E\d{1,2})?\b/i, minIndex: 0 },
   { pattern: /\b\d{1,2}x\d{1,2}\b/i, minIndex: 0 },
+  { pattern: /\bComplete\s+Season\b/i, minIndex: 0 },
   { pattern: /\bSeason\s*\d+/i, minIndex: 0 },
   { pattern: /\bStagione\s*\d+/i, minIndex: 0 },
   { pattern: /\bTemporada\s*\d+/i, minIndex: 0 },
