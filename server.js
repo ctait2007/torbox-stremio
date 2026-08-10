@@ -392,6 +392,50 @@ async function getTorboxLibrary(apiKey) {
   return cache.torboxLibrary;
 }
 
+// Builds the torrent → TMDB/IMDB mapping ONCE per cache cycle instead of
+// redoing it live on every single catalog/stream request. Without this, a
+// stream request re-scans the whole library and re-runs TMDB matching for
+// any torrent whose per-title cache has expired — on a cold cache (or a
+// cold Render instance waking from sleep) that easily exceeds a tight
+// aggregator timeout (AIOStreams defaults to 3s), which reads as "the addon
+// randomly doesn't return streams" even though it eventually would have.
+async function getTorrentIndex(apiKey) {
+  const cache = getCache(apiKey);
+  const now = Date.now();
+  if (cache.torrentIndex && now < cache.torrentIndexExpiry) return cache.torrentIndex;
+
+  const torrents = await getTorboxLibrary(apiKey);
+
+  const entries = await Promise.all(
+    torrents.map(async (torrent) => {
+      try {
+        const torrentType = detectType(torrent);
+        const title = cleanTitle(torrent.name);
+        const year = extractYear(torrent.name);
+        const tmdb = await searchTmdb(title, year, torrentType, apiKey);
+        if (!tmdb) return null;
+
+        let finalType = torrentType;
+        if (torrentType === 'series') {
+          finalType = await resolveSeriesType(tmdb.id, apiKey); // 'series' or 'anime'
+        }
+
+        const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
+        if (!imdbId) return null;
+
+        return { torrent, imdbId, torrentType, finalType, tmdb };
+      } catch (e) {
+        return null;
+      }
+    })
+  );
+
+  const index = entries.filter(Boolean);
+  cache.torrentIndex = index;
+  cache.torrentIndexExpiry = now + TORBOX_CACHE_TTL;
+  return index;
+}
+
 function formatStreamDescription(filename, title, season, episode, filesize) {
   const res = filename.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] ||
               title.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] || null;
@@ -414,6 +458,11 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
 
   const episodeTag = (season !== null && episode !== null)
     ? ` • S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}` : '';
+  // Raw filename first, unmodified — this is what release-name parsers used by
+  // aggregators (AIOStreams etc.) are actually built and tested against, so it
+  // gives them the cleanest possible material to verify title/season/episode
+  // themselves, ahead of our own decorated, human-readable lines below.
+  const line0 = filename || null;
   const line1 = title ? `🎬 ${title}${episodeTag}` : null;
   const line2 = resIcon;
   const qualityParts = [
@@ -427,7 +476,7 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
   const sizeStr = filesize > 0 ? `📦 ${(filesize / 1024 / 1024 / 1024).toFixed(2)} GB` : null;
   const containerStr = container ? `.${container.toLowerCase()}` : null;
   const line5 = [sizeStr, containerStr].filter(Boolean).join(' ➤ ');
-  return [line1, line2, line3, line4, line5].filter(Boolean).join('\n');
+  return [line0, line1, line2, line3, line4, line5].filter(Boolean).join('\n');
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -442,43 +491,21 @@ app.get('/:apiKey/catalog/:type/:id.json', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     const { apiKey, type } = req.params;
-    const torrentType = type === 'anime' ? 'series' : type;
-    const torrents = await getTorboxLibrary(apiKey);
-
-    const results = await Promise.all(
-      torrents.map(async (torrent) => {
-        try {
-          if (detectType(torrent) !== torrentType) return null;
-
-          const title = cleanTitle(torrent.name);
-          const year = extractYear(torrent.name);
-          const tmdb = await searchTmdb(title, year, torrentType, apiKey);
-          if (!tmdb) return null;
-
-          if (torrentType === 'series') {
-            const resolvedType = await resolveSeriesType(tmdb.id, apiKey);
-            if (resolvedType !== type) return null;
-          }
-
-          const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
-          if (!imdbId) return null;
-
-          // Return as series so metadata addons (AIO etc.) can resolve anime shows —
-          // the catalog URL type alone is enough to place it in the anime section.
-          const metaType = type === 'anime' ? 'series' : type;
-          return toMeta(tmdb, imdbId, torrent.id, metaType);
-        } catch (e) { return null; }
-      })
-    );
+    const index = await getTorrentIndex(apiKey);
 
     const seen = new Set();
-    const deduplicated = results.filter(Boolean).filter(meta => {
-      if (seen.has(meta.id)) return false;
-      seen.add(meta.id);
-      return true;
-    });
+    const metas = [];
+    for (const entry of index) {
+      if (entry.finalType !== type) continue;
+      if (seen.has(entry.imdbId)) continue;
+      seen.add(entry.imdbId);
+      // Return as series so metadata addons (AIO etc.) can resolve anime shows —
+      // the catalog URL type alone is enough to place it in the anime section.
+      const metaType = type === 'anime' ? 'series' : type;
+      metas.push(toMeta(entry.tmdb, entry.imdbId, entry.torrent.id, metaType));
+    }
 
-    res.json({ metas: deduplicated });
+    res.json({ metas });
   } catch (err) {
     console.error(err);
     res.status(500).json({ metas: [] });
@@ -496,24 +523,11 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     const season = parts[1] ? parseInt(parts[1]) : null;
     const episode = parts[2] ? parseInt(parts[2]) : null;
 
-    const torrents = await getTorboxLibrary(apiKey);
+    const index = await getTorrentIndex(apiKey);
+    const allMatches = index
+      .filter(entry => entry.torrentType === torrentType && entry.imdbId === id)
+      .map(entry => entry.torrent);
 
-    const matches = await Promise.all(
-      torrents.map(async (torrent) => {
-        try {
-          if (detectType(torrent) !== torrentType) return null;
-          const title = cleanTitle(torrent.name);
-          const year = extractYear(torrent.name);
-          const tmdb = await searchTmdb(title, year, torrentType, apiKey);
-          if (!tmdb) return null;
-          const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
-          if (imdbId !== id) return null;
-          return torrent;
-        } catch (e) { return null; }
-      })
-    );
-
-    const allMatches = matches.filter(Boolean);
     if (!allMatches.length) return res.json({ streams: [] });
 
     let pairs = [];
