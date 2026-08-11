@@ -399,11 +399,33 @@ async function getTorboxLibrary(apiKey) {
 // cold Render instance waking from sleep) that easily exceeds a tight
 // aggregator timeout (AIOStreams defaults to 3s), which reads as "the addon
 // randomly doesn't return streams" even though it eventually would have.
+//
+// Stale-while-revalidate: once an index exists, an expired cache is served
+// immediately (still correct for anything already indexed) while a fresh
+// copy is built in the background. This means only the very first request
+// ever (or right after /refresh) has to wait on a full rebuild — a request
+// landing exactly at the 1hr boundary mid binge-watch never blocks on it.
 async function getTorrentIndex(apiKey) {
   const cache = getCache(apiKey);
   const now = Date.now();
-  if (cache.torrentIndex && now < cache.torrentIndexExpiry) return cache.torrentIndex;
 
+  if (cache.torrentIndex && now < cache.torrentIndexExpiry) {
+    return cache.torrentIndex;
+  }
+
+  if (cache.torrentIndex) {
+    if (!cache.torrentIndexRefreshing) {
+      cache.torrentIndexRefreshing = true;
+      rebuildTorrentIndex(apiKey).finally(() => { cache.torrentIndexRefreshing = false; });
+    }
+    return cache.torrentIndex; // serve stale, refresh happening in the background
+  }
+
+  return rebuildTorrentIndex(apiKey); // nothing cached yet — must wait
+}
+
+async function rebuildTorrentIndex(apiKey) {
+  const cache = getCache(apiKey);
   const torrents = await getTorboxLibrary(apiKey);
 
   const entries = await Promise.all(
@@ -432,7 +454,7 @@ async function getTorrentIndex(apiKey) {
 
   const index = entries.filter(Boolean);
   cache.torrentIndex = index;
-  cache.torrentIndexExpiry = now + TORBOX_CACHE_TTL;
+  cache.torrentIndexExpiry = Date.now() + TORBOX_CACHE_TTL;
   return index;
 }
 
@@ -476,7 +498,13 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
   const sizeStr = filesize > 0 ? `📦 ${(filesize / 1024 / 1024 / 1024).toFixed(2)} GB` : null;
   const containerStr = container ? `.${container.toLowerCase()}` : null;
   const line5 = [sizeStr, containerStr].filter(Boolean).join(' ➤ ');
-  return [line0, line1, line2, line3, line4, line5].filter(Boolean).join('\n');
+  const description = [line0, line1, line2, line3, line4, line5].filter(Boolean).join('\n');
+
+  // Plain, identifier-safe resolution label for the caller to build a
+  // bingeGroup from — separate from resIcon, which is emoji-decorated for display.
+  const resolutionLabel = res ? res.toLowerCase() : 'unknown';
+
+  return { description, resolutionLabel };
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -560,16 +588,27 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
 
     if (!pairs.length) return res.json({ streams: [] });
 
-    const streams = pairs.map(({ file, torrent }) => ({
-      url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${apiKey}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
-      name: '👑 Library ⚡️',
-      description: formatStreamDescription(
-        file.short_name || file.name || '',
+    const streams = pairs.map(({ file, torrent }) => {
+      const filename = file.short_name || file.name || '';
+      const { description, resolutionLabel } = formatStreamDescription(
+        filename,
         cleanTitle(torrent.name),
         season, episode,
         file.size || 0
-      )
-    }));
+      );
+      return {
+        url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${apiKey}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
+        name: '👑 Library ⚡️',
+        description,
+        behaviorHints: {
+          // Lets the client auto-select "the same quality tier" for the next
+          // episode on auto-advance, instead of falling back to whatever it
+          // picks by default when there's nothing to match against.
+          bingeGroup: `torbox-library-${resolutionLabel}`,
+          filename
+        }
+      };
+    });
 
     res.json({ streams });
   } catch (err) {
