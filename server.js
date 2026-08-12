@@ -394,17 +394,18 @@ async function getTorboxLibrary(apiKey) {
 
 // Builds the torrent → TMDB/IMDB mapping ONCE per cache cycle instead of
 // redoing it live on every single catalog/stream request. Without this, a
-// stream request re-scans the whole library and re-runs TMDB matching for
-// any torrent whose per-title cache has expired — on a cold cache (or a
-// cold Render instance waking from sleep) that easily exceeds a tight
-// aggregator timeout (AIOStreams defaults to 3s), which reads as "the addon
-// randomly doesn't return streams" even though it eventually would have.
+// stream request would re-scan the whole library and re-run TMDB matching
+// on every request, which can easily exceed a tight aggregator timeout
+// (AIOStreams defaults to 3s) and reads as "the addon randomly doesn't
+// return streams" even though it would eventually have.
 //
-// Stale-while-revalidate: once an index exists, an expired cache is served
-// immediately (still correct for anything already indexed) while a fresh
-// copy is built in the background. This means only the very first request
-// ever (or right after /refresh) has to wait on a full rebuild — a request
-// landing exactly at the 1hr boundary mid binge-watch never blocks on it.
+// Stale-while-revalidate: a request is NEVER blocked on a full rebuild.
+// A warm-but-expired index is served immediately while a fresh copy builds
+// in the background. A fully cold index (e.g. right after a deploy or a
+// cold start wipes the in-memory cache) is treated the same way — that
+// request gets an empty result right away instead of waiting, and the
+// index is ready for the next one. One possibly-empty response right after
+// a restart beats ever risking a timeout.
 async function getTorrentIndex(apiKey) {
   const cache = getCache(apiKey);
   const now = Date.now();
@@ -413,15 +414,11 @@ async function getTorrentIndex(apiKey) {
     return cache.torrentIndex;
   }
 
-  if (cache.torrentIndex) {
-    if (!cache.torrentIndexRefreshing) {
-      cache.torrentIndexRefreshing = true;
-      rebuildTorrentIndex(apiKey).finally(() => { cache.torrentIndexRefreshing = false; });
-    }
-    return cache.torrentIndex; // serve stale, refresh happening in the background
+  if (!cache.torrentIndexRefreshing) {
+    cache.torrentIndexRefreshing = true;
+    rebuildTorrentIndex(apiKey).finally(() => { cache.torrentIndexRefreshing = false; });
   }
-
-  return rebuildTorrentIndex(apiKey); // nothing cached yet — must wait
+  return cache.torrentIndex || []; // serve stale/empty, refresh happening in the background
 }
 
 async function rebuildTorrentIndex(apiKey) {
