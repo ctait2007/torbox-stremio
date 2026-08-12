@@ -4,6 +4,15 @@ const baseManifest = require('./manifest.json');
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
+// Comma-separated TorBox API keys to proactively rebuild the torrent index
+// the moment the process boots (e.g. right after a deploy), instead of
+// waiting for the first real request to trigger it. Optional — leave unset
+// and nothing changes.
+const WARM_API_KEYS = (process.env.WARM_API_KEYS || '')
+  .split(',')
+  .map(k => k.trim())
+  .filter(Boolean);
+
 const caches = new Map();
 const TORBOX_CACHE_TTL = 60 * 60 * 1000;
 const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000;
@@ -367,6 +376,36 @@ async function getImdbId(tmdbId, type, apiKey, retries = 3) {
   return null;
 }
 
+// Reverse of getImdbId: given an imdbId we already have (from an incoming
+// stream request), get the canonical title back from TMDB in one call. Used
+// by the stream handler's cold-index fallback — we already know exactly
+// which title we're looking for, so candidate torrents can be checked with
+// a local word-overlap comparison instead of a per-torrent TMDB search.
+async function findByImdbId(imdbId, type, apiKey, retries = 2) {
+  const cache = getCache(apiKey);
+  const cacheKey = `find:${imdbId}:${type}`;
+  const cached = cache.tmdb.get(cacheKey);
+  if (cached && Date.now() < cached.expiry) return cached.value;
+
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
+      const json = await res.json();
+      const result = type === 'movie' ? (json.movie_results || [])[0] : (json.tv_results || [])[0];
+      if (result) {
+        cache.tmdb.set(cacheKey, { value: result, expiry: Date.now() + TMDB_CACHE_TTL });
+        return result;
+      }
+      break;
+    } catch (e) {
+      console.error(`TMDB find-by-imdb attempt ${i + 1} failed for ${imdbId}:`, e.message);
+      if (i < retries - 1) await new Promise(r => setTimeout(r, 300));
+    }
+  }
+  cache.tmdb.set(cacheKey, { value: null, expiry: Date.now() + TMDB_CACHE_TTL });
+  return null;
+}
+
 function toMeta(tmdb, imdbId, torrentId, type) {
   return {
     id: imdbId, type,
@@ -549,9 +588,33 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     const episode = parts[2] ? parseInt(parts[2]) : null;
 
     const index = await getTorrentIndex(apiKey);
-    const allMatches = index
+    let allMatches = index
       .filter(entry => entry.torrentType === torrentType && entry.imdbId === id)
       .map(entry => entry.torrent);
+
+    if (!allMatches.length) {
+      // Not in the precomputed index — either it's still mid-rebuild (cold
+      // start, e.g. right after a deploy) or this title genuinely isn't in
+      // the library. Don't just return empty and let the aggregator fall
+      // back to another scraper: try one small targeted check first. We
+      // already know the imdbId, so this needs no per-torrent TMDB search —
+      // just the canonical title (one TMDB call) compared locally against
+      // whatever's in the library right now.
+      const targetMeta = await findByImdbId(id, torrentType, apiKey);
+      if (targetMeta) {
+        const targetWords = wordsOf(targetMeta.title || targetMeta.name || '');
+        if (targetWords.length) {
+          const library = await getTorboxLibrary(apiKey);
+          allMatches = library.filter(torrent => {
+            if (detectType(torrent) !== torrentType) return false;
+            const torrentWords = wordsOf(cleanTitle(torrent.name));
+            if (!torrentWords.length) return false;
+            const overlap = targetWords.filter(w => torrentWords.includes(w)).length;
+            return overlap / Math.max(targetWords.length, torrentWords.length) >= 0.6;
+          });
+        }
+      }
+    }
 
     if (!allMatches.length) return res.json({ streams: [] });
 
@@ -665,4 +728,9 @@ app.get('/:apiKey/refresh', (req, res) => {
 
 app.get('/configure', (req, res) => res.redirect('/'));
 
-app.listen(3000, () => console.log('TorBox addon running'));
+app.listen(3000, () => {
+  console.log('TorBox addon running');
+  for (const key of WARM_API_KEYS) {
+    getTorrentIndex(key).catch(e => console.error('Warm-up failed for a configured key:', e.message));
+  }
+});
