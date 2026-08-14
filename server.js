@@ -17,6 +17,19 @@ const caches = new Map();
 const TORBOX_CACHE_TTL = 60 * 60 * 1000;
 const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000;
 
+// Caps how long a live request will wait on a chain of upstream calls
+// (TorBox, TMDB) before giving up. Retries inside those calls are fine for
+// the background index rebuild, where nothing is waiting on the result —
+// but a request actually being served to AIOStreams needs a hard ceiling,
+// since a slow-but-eventually-successful TorBox/TMDB response is just as
+// bad as an outright failure if it blows the aggregator's own timeout.
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms))
+  ]);
+}
+
 function getCache(apiKey) {
   if (!caches.has(apiKey)) {
     caches.set(apiKey, {
@@ -418,17 +431,33 @@ function toMeta(tmdb, imdbId, torrentId, type) {
   };
 }
 
-async function getTorboxLibrary(apiKey) {
+async function getTorboxLibrary(apiKey, retries = 2) {
   const cache = getCache(apiKey);
   const now = Date.now();
   if (cache.torboxLibrary && now < cache.torboxLibraryExpiry) return cache.torboxLibrary;
-  const res = await fetch('https://api.torbox.app/v1/api/torrents/mylist', {
-    headers: { Authorization: `Bearer ${apiKey}` }
-  });
-  const json = await res.json();
-  cache.torboxLibrary = json.data || [];
-  cache.torboxLibraryExpiry = now + TORBOX_CACHE_TTL;
-  return cache.torboxLibrary;
+
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch('https://api.torbox.app/v1/api/torrents/mylist', {
+        headers: { Authorization: `Bearer ${apiKey}` }
+      });
+      const json = await res.json();
+      cache.torboxLibrary = json.data || [];
+      cache.torboxLibraryExpiry = now + TORBOX_CACHE_TTL;
+      return cache.torboxLibrary;
+    } catch (e) {
+      console.error(`TorBox library fetch attempt ${i + 1} failed:`, e.message);
+      if (i < retries - 1) await new Promise(r => setTimeout(r, 400));
+    }
+  }
+
+  // Every attempt failed. Serve the last-known-good library instead of
+  // throwing, if we have one — a stale library is far better than every
+  // caller (rebuildTorrentIndex, the stream fallback, /debug) crashing
+  // because TorBox had one bad moment. Only throw if there's truly nothing
+  // cached yet to fall back to.
+  if (cache.torboxLibrary) return cache.torboxLibrary;
+  throw new Error('TorBox library unavailable and nothing cached yet');
 }
 
 // Builds the torrent → TMDB/IMDB mapping ONCE per cache cycle instead of
@@ -462,7 +491,13 @@ async function getTorrentIndex(apiKey) {
 
 async function rebuildTorrentIndex(apiKey) {
   const cache = getCache(apiKey);
-  const torrents = await getTorboxLibrary(apiKey);
+  let torrents;
+  try {
+    torrents = await getTorboxLibrary(apiKey);
+  } catch (e) {
+    console.error('rebuildTorrentIndex: could not get TorBox library, index left as-is:', e.message);
+    return cache.torrentIndex || [];
+  }
 
   const entries = await Promise.all(
     torrents.map(async (torrent) => {
@@ -587,62 +622,75 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     const season = parts[1] ? parseInt(parts[1]) : null;
     const episode = parts[2] ? parseInt(parts[2]) : null;
 
+    const buildPairs = (torrents) => {
+      const found = [];
+      if (season !== null && episode !== null) {
+        const seasonStr = String(season).padStart(2, '0');
+        const episodeStr = String(episode).padStart(2, '0');
+        const pattern = new RegExp(`(S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}|${parseInt(season)}[xX]${episodeStr})`, 'i');
+        for (const torrent of torrents) {
+          const filtered = (torrent.files || []).filter(f =>
+            pattern.test(f.name) &&
+            /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+          );
+          filtered.forEach(f => found.push({ file: f, torrent }));
+        }
+      } else {
+        for (const torrent of torrents) {
+          const videoFiles = (torrent.files || []).filter(f =>
+            /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+          );
+          if (videoFiles.length > 0) {
+            videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
+            found.push({ file: videoFiles[0], torrent });
+          }
+        }
+      }
+      return found;
+    };
+
     const index = await getTorrentIndex(apiKey);
-    let allMatches = index
+    const indexed = index
       .filter(entry => entry.torrentType === torrentType && entry.imdbId === id)
       .map(entry => entry.torrent);
 
-    if (!allMatches.length) {
-      // Not in the precomputed index — either it's still mid-rebuild (cold
-      // start, e.g. right after a deploy) or this title genuinely isn't in
-      // the library. Don't just return empty and let the aggregator fall
-      // back to another scraper: try one small targeted check first. We
-      // already know the imdbId, so this needs no per-torrent TMDB search —
-      // just the canonical title (one TMDB call) compared locally against
-      // whatever's in the library right now.
-      const targetMeta = await findByImdbId(id, torrentType, apiKey);
-      if (targetMeta) {
-        const targetWords = wordsOf(targetMeta.title || targetMeta.name || '');
-        if (targetWords.length) {
+    let pairs = buildPairs(indexed);
+
+    if (!pairs.length) {
+      // No playable file from the (possibly stale) precomputed index —
+      // either this show isn't indexed yet (cold start) or, just as
+      // likely, it IS indexed but none of ITS known torrents happen to
+      // contain this specific episode (e.g. that episode's torrent was
+      // only added to the library after the last rebuild — the show-level
+      // match succeeds but the file-level match doesn't). Either way, try
+      // one targeted, live check before giving up: get the real title for
+      // this imdbId (one cached TMDB call), match it locally against the
+      // CURRENT library, and re-check for the file there.
+      //
+      // The whole attempt is capped at 6s. TorBox/TMDB being outright down
+      // was already handled by the try/catch around this whole handler —
+      // this covers them being merely slow, which is just as bad for a
+      // live request against a tight aggregator timeout, but wouldn't have
+      // thrown to trigger that catch.
+      try {
+        pairs = await withTimeout((async () => {
+          const targetMeta = await findByImdbId(id, torrentType, apiKey);
+          if (!targetMeta) return [];
+          const targetWords = wordsOf(targetMeta.title || targetMeta.name || '');
+          if (!targetWords.length) return [];
           const library = await getTorboxLibrary(apiKey);
-          allMatches = library.filter(torrent => {
+          const candidates = library.filter(torrent => {
             if (detectType(torrent) !== torrentType) return false;
             const torrentWords = wordsOf(cleanTitle(torrent.name));
             if (!torrentWords.length) return false;
             const overlap = targetWords.filter(w => torrentWords.includes(w)).length;
             return overlap / Math.max(targetWords.length, torrentWords.length) >= 0.6;
           });
-        }
-      }
-    }
-
-    if (!allMatches.length) return res.json({ streams: [] });
-
-    let pairs = [];
-
-    if (season !== null && episode !== null) {
-      const seasonStr = String(season).padStart(2, '0');
-      const episodeStr = String(episode).padStart(2, '0');
-      const pattern = new RegExp(`(S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}|${parseInt(season)}[xX]${episodeStr})`, 'i');
-
-      for (const torrent of allMatches) {
-        const filtered = (torrent.files || []).filter(f =>
-          pattern.test(f.name) &&
-          /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-        );
-        if (filtered.length > 0) {
-          filtered.forEach(f => pairs.push({ file: f, torrent }));
-        }
-      }
-    } else {
-      for (const torrent of allMatches) {
-        const videoFiles = (torrent.files || []).filter(f =>
-          /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-        );
-        if (videoFiles.length > 0) {
-          videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
-          pairs.push({ file: videoFiles[0], torrent });
-        }
+          return buildPairs(candidates);
+        })(), 6000);
+      } catch (e) {
+        console.error(`Targeted fallback gave up for ${id}:`, e.message);
+        pairs = [];
       }
     }
 
