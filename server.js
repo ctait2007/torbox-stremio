@@ -16,6 +16,7 @@ const WARM_API_KEYS = (process.env.WARM_API_KEYS || '')
 const caches = new Map();
 const TORBOX_CACHE_TTL = 60 * 60 * 1000;
 const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000;
+const REBUILD_CONCURRENCY = 12; // torrents TMDB-matched in parallel during a rebuild
 
 // Caps how long a live request will wait on a chain of upstream calls
 // (TorBox, TMDB) before giving up. Retries inside those calls are fine for
@@ -30,11 +31,52 @@ function withTimeout(promise, ms) {
   ]);
 }
 
+// Every fetch() in this file used to be uncancellable — Promise.race (above)
+// stops US from waiting past a deadline, but a slow-not-failed TorBox/TMDB
+// response kept running in the background regardless, tying up a connection
+// for nothing. This actually aborts it.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Randomizes a retry delay instead of using a flat one. When TMDB
+// rate-limits a burst of simultaneous requests, fixed backoff means they
+// all retry in near lockstep and re-trigger the same limit; spreading them
+// out avoids that.
+function jitter(baseMs, spread = 0.4) {
+  const delta = baseMs * spread;
+  return Math.round(baseMs - delta / 2 + Math.random() * delta);
+}
+
+// Runs fn() over items with at most `limit` in flight at once, instead of
+// firing all of them simultaneously via Promise.all. A slow/retrying item
+// only occupies one worker slot rather than competing for TMDB alongside
+// every other torrent in the library at the same time.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 function getCache(apiKey) {
   if (!caches.has(apiKey)) {
     caches.set(apiKey, {
       torboxLibrary: null,
       torboxLibraryExpiry: 0,
+      torboxLibraryPromise: null,
       tmdb: new Map(),
       imdbId: new Map()
     });
@@ -178,7 +220,7 @@ async function resolveSeriesType(tmdbId, apiKey) {
   if (cached && Date.now() < cached.expiry) return cached.value;
 
   try {
-    const res = await fetch(`https://api.themoviedb.org/3/tv/${tmdbId}/keywords?api_key=${TMDB_API_KEY}`);
+    const res = await fetchWithTimeout(`https://api.themoviedb.org/3/tv/${tmdbId}/keywords?api_key=${TMDB_API_KEY}`, {}, 4000);
     const json = await res.json();
     const isAnime = (json.results || []).some(k => k.id === 210024);
     const resolved = isAnime ? 'anime' : 'series';
@@ -336,14 +378,14 @@ async function searchTmdb(title, year, type, apiKey, retries = 3) {
 
       if (year) {
         const url = `https://api.themoviedb.org/3/${endpoint}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}&${yearParam}=${year}`;
-        const res = await fetch(url);
+        const res = await fetchWithTimeout(url, {}, 4000);
         const json = await res.json();
         results = json.results || [];
       }
 
       if (!results.length) {
         const url = `https://api.themoviedb.org/3/${endpoint}?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`;
-        const res = await fetch(url);
+        const res = await fetchWithTimeout(url, {}, 4000);
         const json = await res.json();
         results = json.results || [];
       }
@@ -358,7 +400,7 @@ async function searchTmdb(title, year, type, apiKey, retries = 3) {
       break; // got a real response, no point retrying an identical query
     } catch (e) {
       console.error(`TMDB search attempt ${i + 1} failed for "${title}":`, e.message);
-      if (i < retries - 1) await new Promise(r => setTimeout(r, 500));
+      if (i < retries - 1) await new Promise(r => setTimeout(r, jitter(500)));
     }
   }
 
@@ -375,7 +417,7 @@ async function getImdbId(tmdbId, type, apiKey, retries = 3) {
   const endpoint = type === 'movie' ? 'movie' : 'tv';
   for (let i = 0; i < retries; i++) {
     try {
-      const res = await fetch(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`);
+      const res = await fetchWithTimeout(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`, {}, 4000);
       const json = await res.json();
       if (json.imdb_id) {
         cache.imdbId.set(cacheKey, { value: json.imdb_id, expiry: Date.now() + TMDB_CACHE_TTL });
@@ -384,7 +426,7 @@ async function getImdbId(tmdbId, type, apiKey, retries = 3) {
     } catch (e) {
       console.error(`IMDB ID lookup attempt ${i + 1} failed:`, e.message);
     }
-    if (i < retries - 1) await new Promise(r => setTimeout(r, 500));
+    if (i < retries - 1) await new Promise(r => setTimeout(r, jitter(500)));
   }
   return null;
 }
@@ -402,7 +444,7 @@ async function findByImdbId(imdbId, type, apiKey, retries = 2) {
 
   for (let i = 0; i < retries; i++) {
     try {
-      const res = await fetch(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
+      const res = await fetchWithTimeout(`https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`, {}, 4000);
       const json = await res.json();
       const result = type === 'movie' ? (json.movie_results || [])[0] : (json.tv_results || [])[0];
       if (result) {
@@ -412,7 +454,7 @@ async function findByImdbId(imdbId, type, apiKey, retries = 2) {
       break;
     } catch (e) {
       console.error(`TMDB find-by-imdb attempt ${i + 1} failed for ${imdbId}:`, e.message);
-      if (i < retries - 1) await new Promise(r => setTimeout(r, 300));
+      if (i < retries - 1) await new Promise(r => setTimeout(r, jitter(300)));
     }
   }
   cache.tmdb.set(cacheKey, { value: null, expiry: Date.now() + TMDB_CACHE_TTL });
@@ -436,28 +478,39 @@ async function getTorboxLibrary(apiKey, retries = 2) {
   const now = Date.now();
   if (cache.torboxLibrary && now < cache.torboxLibraryExpiry) return cache.torboxLibrary;
 
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await fetch('https://api.torbox.app/v1/api/torrents/mylist', {
-        headers: { Authorization: `Bearer ${apiKey}` }
-      });
-      const json = await res.json();
-      cache.torboxLibrary = json.data || [];
-      cache.torboxLibraryExpiry = now + TORBOX_CACHE_TTL;
-      return cache.torboxLibrary;
-    } catch (e) {
-      console.error(`TorBox library fetch attempt ${i + 1} failed:`, e.message);
-      if (i < retries - 1) await new Promise(r => setTimeout(r, 400));
-    }
-  }
+  // Multiple callers can land here around the same moment on a cold/expired
+  // cache — the background rebuild plus one or more live fallbacks. Without
+  // this, each fires its own independent TorBox request. Share one.
+  if (cache.torboxLibraryPromise) return cache.torboxLibraryPromise;
 
-  // Every attempt failed. Serve the last-known-good library instead of
-  // throwing, if we have one — a stale library is far better than every
-  // caller (rebuildTorrentIndex, the stream fallback, /debug) crashing
-  // because TorBox had one bad moment. Only throw if there's truly nothing
-  // cached yet to fall back to.
-  if (cache.torboxLibrary) return cache.torboxLibrary;
-  throw new Error('TorBox library unavailable and nothing cached yet');
+  cache.torboxLibraryPromise = (async () => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const res = await fetchWithTimeout('https://api.torbox.app/v1/api/torrents/mylist', {
+          headers: { Authorization: `Bearer ${apiKey}` }
+        }, 5000);
+        const json = await res.json();
+        cache.torboxLibrary = json.data || [];
+        cache.torboxLibraryExpiry = Date.now() + TORBOX_CACHE_TTL;
+        return cache.torboxLibrary;
+      } catch (e) {
+        console.error(`TorBox library fetch attempt ${i + 1} failed:`, e.message);
+        if (i < retries - 1) await new Promise(r => setTimeout(r, jitter(400)));
+      }
+    }
+    // Every attempt failed. Serve the last-known-good library instead of
+    // throwing, if we have one — a stale library beats every caller
+    // (rebuildTorrentIndex, the stream fallback, /debug) crashing because
+    // TorBox had one bad moment. Only throw if nothing's cached yet.
+    if (cache.torboxLibrary) return cache.torboxLibrary;
+    throw new Error('TorBox library unavailable and nothing cached yet');
+  })();
+
+  try {
+    return await cache.torboxLibraryPromise;
+  } finally {
+    cache.torboxLibraryPromise = null;
+  }
 }
 
 // Builds the torrent → TMDB/IMDB mapping ONCE per cache cycle instead of
@@ -499,29 +552,43 @@ async function rebuildTorrentIndex(apiKey) {
     return cache.torrentIndex || [];
   }
 
-  const entries = await Promise.all(
-    torrents.map(async (torrent) => {
-      try {
-        const torrentType = detectType(torrent);
-        const title = cleanTitle(torrent.name);
-        const year = extractYear(torrent.name);
-        const tmdb = await searchTmdb(title, year, torrentType, apiKey);
-        if (!tmdb) return null;
+  const matchOne = async (torrent) => {
+    try {
+      const torrentType = detectType(torrent);
+      const title = cleanTitle(torrent.name);
+      const year = extractYear(torrent.name);
+      const tmdb = await searchTmdb(title, year, torrentType, apiKey);
+      if (!tmdb) return null;
 
-        let finalType = torrentType;
-        if (torrentType === 'series') {
-          finalType = await resolveSeriesType(tmdb.id, apiKey); // 'series' or 'anime'
-        }
-
-        const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
-        if (!imdbId) return null;
-
-        return { torrent, imdbId, torrentType, finalType, tmdb };
-      } catch (e) {
-        return null;
+      let finalType = torrentType;
+      if (torrentType === 'series') {
+        finalType = await resolveSeriesType(tmdb.id, apiKey); // 'series' or 'anime'
       }
-    })
-  );
+
+      const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
+      if (!imdbId) return null;
+
+      return { torrent, imdbId, torrentType, finalType, tmdb };
+    } catch (e) {
+      return null;
+    }
+  };
+
+  let entries;
+  try {
+    // Bounded concurrency instead of firing every torrent at TMDB at once —
+    // a slow/retrying torrent only ties up one of REBUILD_CONCURRENCY slots
+    // rather than piling on top of every other lookup simultaneously. The
+    // outer timeout is a safety net for a truly pathological case (a bug,
+    // not just slow API calls — those are already bounded per-call by
+    // fetchWithTimeout): without it, one stuck item could keep
+    // torrentIndexRefreshing stuck "true" forever and block all future
+    // rebuild attempts.
+    entries = await withTimeout(mapWithConcurrency(torrents, REBUILD_CONCURRENCY, matchOne), 60000);
+  } catch (e) {
+    console.error('rebuildTorrentIndex: gave up waiting on the batch, keeping previous index:', e.message);
+    return cache.torrentIndex || [];
+  }
 
   const index = entries.filter(Boolean);
   cache.torrentIndex = index;
@@ -664,8 +731,9 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       // only added to the library after the last rebuild — the show-level
       // match succeeds but the file-level match doesn't). Either way, try
       // one targeted, live check before giving up: get the real title for
-      // this imdbId (one cached TMDB call), match it locally against the
-      // CURRENT library, and re-check for the file there.
+      // this imdbId and the current library — independent calls, run
+      // together instead of stacked — then match locally and re-check for
+      // the file.
       //
       // The whole attempt is capped at 6s. TorBox/TMDB being outright down
       // was already handled by the try/catch around this whole handler —
@@ -674,11 +742,13 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       // thrown to trigger that catch.
       try {
         pairs = await withTimeout((async () => {
-          const targetMeta = await findByImdbId(id, torrentType, apiKey);
+          const [targetMeta, library] = await Promise.all([
+            findByImdbId(id, torrentType, apiKey),
+            getTorboxLibrary(apiKey)
+          ]);
           if (!targetMeta) return [];
           const targetWords = wordsOf(targetMeta.title || targetMeta.name || '');
           if (!targetWords.length) return [];
-          const library = await getTorboxLibrary(apiKey);
           const candidates = library.filter(torrent => {
             if (detectType(torrent) !== torrentType) return false;
             const torrentWords = wordsOf(cleanTitle(torrent.name));
