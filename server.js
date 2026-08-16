@@ -77,6 +77,7 @@ function getCache(apiKey) {
       torboxLibrary: null,
       torboxLibraryExpiry: 0,
       torboxLibraryPromise: null,
+      torboxLibraryRefreshing: false,
       tmdb: new Map(),
       imdbId: new Map()
     });
@@ -476,11 +477,41 @@ function toMeta(tmdb, imdbId, torrentId, type) {
 async function getTorboxLibrary(apiKey, retries = 2) {
   const cache = getCache(apiKey);
   const now = Date.now();
-  if (cache.torboxLibrary && now < cache.torboxLibraryExpiry) return cache.torboxLibrary;
 
-  // Multiple callers can land here around the same moment on a cold/expired
-  // cache — the background rebuild plus one or more live fallbacks. Without
-  // this, each fires its own independent TorBox request. Share one.
+  if (cache.torboxLibrary && now < cache.torboxLibraryExpiry) {
+    return cache.torboxLibrary;
+  }
+
+  // Same stale-while-revalidate pattern getTorrentIndex already uses, which
+  // this was missing until now: once we have SOMETHING cached, TTL expiry
+  // alone never blocks a caller on a live fetch — serve the stale library
+  // and refresh in the background instead. A torrent library doesn't change
+  // drastically minute to minute, and "briefly stale" beats "live request
+  // blocked on a network call." This matters here specifically because
+  // torboxLibrary and torrentIndex share the same 1hr TTL and get built
+  // together, so they tend to go stale at the same moment — previously
+  // that meant BOTH the index (already protected) and the library
+  // (not protected until now) needed a fresh TorBox call before a request
+  // depending on the fallback could return.
+  if (cache.torboxLibrary) {
+    if (!cache.torboxLibraryRefreshing) {
+      cache.torboxLibraryRefreshing = true;
+      fetchTorboxLibrary(apiKey, retries).finally(() => { cache.torboxLibraryRefreshing = false; });
+    }
+    return cache.torboxLibrary;
+  }
+
+  // Nothing cached at all yet — first-ever call for this key, no choice
+  // but to wait on a real fetch.
+  return fetchTorboxLibrary(apiKey, retries);
+}
+
+async function fetchTorboxLibrary(apiKey, retries) {
+  const cache = getCache(apiKey);
+
+  // Multiple callers can land here around the same moment — the background
+  // rebuild plus one or more live fallbacks. Without this, each fires its
+  // own independent TorBox request. Share one.
   if (cache.torboxLibraryPromise) return cache.torboxLibraryPromise;
 
   cache.torboxLibraryPromise = (async () => {
@@ -768,7 +799,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
             return true;
           });
           return buildPairs(candidates);
-        })(), 6000);
+        })(), 7000);
       } catch (e) {
         console.error(`Targeted fallback gave up for ${id}:`, e.message);
         pairs = [];
