@@ -15,6 +15,15 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection (process kept alive):', reason && reason.message ? reason.message : reason);
 });
 
+// unhandledRejection only covers promise rejections — a genuine synchronous
+// throw that nothing catches needs this separate handler, or it takes the
+// process down the same way. Covering this too since the last restart
+// wasn't accompanied by an unhandledRejection log, so it wasn't (only) the
+// bug fixed above.
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception (process kept alive):', err && err.message ? err.message : err);
+});
+
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
 // Comma-separated TorBox API keys to proactively rebuild the torrent index
@@ -652,8 +661,14 @@ async function rebuildTorrentIndex(apiKey) {
 }
 
 function formatStreamDescription(filename, title, season, episode, filesize) {
-  const res = filename.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] ||
-              title.match(/\b(2160p|1080p|720p|576p|480p)\b/i)?.[1] || null;
+  // "4k" and "2160p" mean the same thing; normalize immediately so
+  // everything downstream (the label below, and resolutionLabel, which
+  // bingeGroup is built from) treats a file tagged either way identically
+  // instead of "4k" falling through to unknown or getting its own
+  // separate bingeGroup bucket.
+  const rawRes = filename.match(/\b(2160p|4k|1080p|720p|576p|480p)\b/i)?.[1] ||
+                 title.match(/\b(2160p|4k|1080p|720p|576p|480p)\b/i)?.[1] || null;
+  const res = rawRes && rawRes.toLowerCase() === '4k' ? '2160p' : rawRes;
   const quality = filename.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] ||
                   title.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] || null;
   const encode = filename.match(/\b(x264|x265|h264|h265|hevc|avc)\b/i)?.[1] ||
