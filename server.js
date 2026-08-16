@@ -16,7 +16,7 @@ const WARM_API_KEYS = (process.env.WARM_API_KEYS || '')
 const caches = new Map();
 const TORBOX_CACHE_TTL = 60 * 60 * 1000;
 const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000;
-const REBUILD_CONCURRENCY = 12; // torrents TMDB-matched in parallel during a rebuild
+const REBUILD_CONCURRENCY = 25; // torrents TMDB-matched in parallel during a rebuild — at 12, a 48-item library took 4 sequential rounds instead of the ~2 this needs; TMDB rate-limiting only becomes a real risk at a much larger scale than this
 
 // Caps how long a live request will wait on a chain of upstream calls
 // (TorBox, TMDB) before giving up. Retries inside those calls are fine for
@@ -749,12 +749,23 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
           if (!targetMeta) return [];
           const targetWords = wordsOf(targetMeta.title || targetMeta.name || '');
           if (!targetWords.length) return [];
+          const targetDate = targetMeta.release_date || targetMeta.first_air_date || '';
+          const targetYear = targetDate ? parseInt(targetDate.slice(0, 4)) : null;
           const candidates = library.filter(torrent => {
             if (detectType(torrent) !== torrentType) return false;
             const torrentWords = wordsOf(cleanTitle(torrent.name));
             if (!torrentWords.length) return false;
             const overlap = targetWords.filter(w => torrentWords.includes(w)).length;
-            return overlap / Math.max(targetWords.length, torrentWords.length) >= 0.6;
+            if (overlap / Math.max(targetWords.length, torrentWords.length) < 0.6) return false;
+            // Word overlap alone lets a same-titled but different-year entry
+            // through (a remake, a different show entirely) — the primary
+            // index path guards against exactly this via pickBestMatch's
+            // year-proximity check; do the same here. Skip the check only
+            // when we can't extract a year from one side or the other,
+            // rather than rejecting a legitimate match for missing data.
+            const torrentYear = extractYear(torrent.name);
+            if (targetYear && torrentYear && Math.abs(targetYear - torrentYear) > 1) return false;
+            return true;
           });
           return buildPairs(candidates);
         })(), 6000);
