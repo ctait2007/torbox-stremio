@@ -2,6 +2,19 @@ const express = require('express');
 const app = express();
 const baseManifest = require('./manifest.json');
 
+// Belt-and-suspenders: on modern Node, an unhandled promise rejection
+// crashes the entire process by default — not just the request that
+// caused it. The Render logs from this session show exactly that pattern:
+// a burst of failed TMDB calls right after boot, then the process
+// restarting from scratch shortly after, over and over. withTimeout's
+// Promise.race (below) had a real bug that could cause exactly this (see
+// its comment); this handler is a backstop in case anything else like it
+// gets missed — log and keep running instead of taking the whole server
+// down.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection (process kept alive):', reason && reason.message ? reason.message : reason);
+});
+
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
 // Comma-separated TorBox API keys to proactively rebuild the torrent index
@@ -25,6 +38,13 @@ const REBUILD_CONCURRENCY = 25; // torrents TMDB-matched in parallel during a re
 // since a slow-but-eventually-successful TorBox/TMDB response is just as
 // bad as an outright failure if it blows the aggregator's own timeout.
 function withTimeout(promise, ms) {
+  // Promise.race does not cancel the loser. If `promise` goes on to reject
+  // after the timeout branch has already won the race, nothing is watching
+  // it anymore — that's an unhandled rejection, which crashes the entire
+  // Node process on modern defaults (not just this one request). Attach a
+  // no-op catch directly to the original promise so a late rejection is
+  // silently absorbed instead of taking the whole server down.
+  promise.catch(() => {});
   return Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms))
@@ -496,7 +516,9 @@ async function getTorboxLibrary(apiKey, retries = 2) {
   if (cache.torboxLibrary) {
     if (!cache.torboxLibraryRefreshing) {
       cache.torboxLibraryRefreshing = true;
-      fetchTorboxLibrary(apiKey, retries).finally(() => { cache.torboxLibraryRefreshing = false; });
+      fetchTorboxLibrary(apiKey, retries)
+        .catch(e => console.error('Background library refresh failed:', e.message))
+        .finally(() => { cache.torboxLibraryRefreshing = false; });
     }
     return cache.torboxLibrary;
   }
@@ -568,7 +590,9 @@ async function getTorrentIndex(apiKey) {
 
   if (!cache.torrentIndexRefreshing) {
     cache.torrentIndexRefreshing = true;
-    rebuildTorrentIndex(apiKey).finally(() => { cache.torrentIndexRefreshing = false; });
+    rebuildTorrentIndex(apiKey)
+      .catch(e => console.error('Background index rebuild failed:', e.message))
+      .finally(() => { cache.torrentIndexRefreshing = false; });
   }
   return cache.torrentIndex || []; // serve stale/empty, refresh happening in the background
 }
