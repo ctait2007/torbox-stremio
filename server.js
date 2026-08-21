@@ -24,6 +24,19 @@ process.on('uncaughtException', (err) => {
   console.error('Uncaught exception (process kept alive):', err && err.message ? err.message : err);
 });
 
+// Neither restart in the last log came with an unhandledRejection or
+// uncaughtException line — both handlers above stayed silent — which rules
+// out a JS-catchable crash as the (sole) cause of those two. What's left:
+// Render put the instance to sleep and this is a normal wake-up, an
+// out-of-memory kill (uncatchable by any JS handler — the OS just kills
+// the process), or something else entirely. A graceful shutdown (a deploy,
+// or Render intentionally stopping the instance) sends SIGTERM first; an
+// OOM kill does not. Logging this makes the next restart's log tell us
+// which case it was instead of guessing again.
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM — graceful shutdown, not a crash');
+});
+
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
 // Comma-separated TorBox API keys to proactively rebuild the torrent index
@@ -610,7 +623,16 @@ async function rebuildTorrentIndex(apiKey) {
   const cache = getCache(apiKey);
   let torrents;
   try {
-    torrents = await getTorboxLibrary(apiKey);
+    // Deliberately fetchTorboxLibrary directly here, not getTorboxLibrary.
+    // getTorboxLibrary's stale-while-revalidate is right for a live request
+    // (speed matters more than freshness) but wrong here: a rebuild's whole
+    // job is to catch up with reality, so it needs a genuine fresh attempt
+    // rather than being handed back the same old snapshot the previous
+    // rebuild already used. Without this, adding something new to the
+    // library could get missed for an extra full cache cycle — the rebuild
+    // "runs" but silently reuses stale data, and the index's own TTL still
+    // resets as if it had actually refreshed.
+    torrents = await fetchTorboxLibrary(apiKey, 2);
   } catch (e) {
     console.error('rebuildTorrentIndex: could not get TorBox library, index left as-is:', e.message);
     return cache.torrentIndex || [];
