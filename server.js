@@ -2,47 +2,24 @@ const express = require('express');
 const app = express();
 const baseManifest = require('./manifest.json');
 
-// Belt-and-suspenders: on modern Node, an unhandled promise rejection
-// crashes the entire process by default — not just the request that
-// caused it. The Render logs from this session show exactly that pattern:
-// a burst of failed TMDB calls right after boot, then the process
-// restarting from scratch shortly after, over and over. withTimeout's
-// Promise.race (below) had a real bug that could cause exactly this (see
-// its comment); this handler is a backstop in case anything else like it
-// gets missed — log and keep running instead of taking the whole server
-// down.
+// Unhandled rejections crash the process by default on modern Node — log and keep running.
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection (process kept alive):', reason && reason.message ? reason.message : reason);
 });
 
-// unhandledRejection only covers promise rejections — a genuine synchronous
-// throw that nothing catches needs this separate handler, or it takes the
-// process down the same way. Covering this too since the last restart
-// wasn't accompanied by an unhandledRejection log, so it wasn't (only) the
-// bug fixed above.
+// Catches synchronous throws that unhandledRejection above doesn't.
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception (process kept alive):', err && err.message ? err.message : err);
 });
 
-// Neither restart in the last log came with an unhandledRejection or
-// uncaughtException line — both handlers above stayed silent — which rules
-// out a JS-catchable crash as the (sole) cause of those two. What's left:
-// Render put the instance to sleep and this is a normal wake-up, an
-// out-of-memory kill (uncatchable by any JS handler — the OS just kills
-// the process), or something else entirely. A graceful shutdown (a deploy,
-// or Render intentionally stopping the instance) sends SIGTERM first; an
-// OOM kill does not. Logging this makes the next restart's log tell us
-// which case it was instead of guessing again.
+// Distinguishes a graceful restart (deploy/sleep) from a real crash in the logs.
 process.on('SIGTERM', () => {
   console.log('Received SIGTERM — graceful shutdown, not a crash');
 });
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
-// Comma-separated TorBox API keys to proactively rebuild the torrent index
-// the moment the process boots (e.g. right after a deploy), instead of
-// waiting for the first real request to trigger it. Optional — leave unset
-// and nothing changes.
+// TorBox keys to pre-warm the cache for on boot. Optional.
 const WARM_API_KEYS = (process.env.WARM_API_KEYS || '')
   .split(',')
   .map(k => k.trim())
@@ -51,21 +28,12 @@ const WARM_API_KEYS = (process.env.WARM_API_KEYS || '')
 const caches = new Map();
 const TORBOX_CACHE_TTL = 60 * 60 * 1000;
 const TMDB_CACHE_TTL = 24 * 60 * 60 * 1000;
-const REBUILD_CONCURRENCY = 25; // torrents TMDB-matched in parallel during a rebuild — at 12, a 48-item library took 4 sequential rounds instead of the ~2 this needs; TMDB rate-limiting only becomes a real risk at a much larger scale than this
+const REBUILD_CONCURRENCY = 25; // concurrent TMDB matches during a rebuild
 
-// Caps how long a live request will wait on a chain of upstream calls
-// (TorBox, TMDB) before giving up. Retries inside those calls are fine for
-// the background index rebuild, where nothing is waiting on the result —
-// but a request actually being served to AIOStreams needs a hard ceiling,
-// since a slow-but-eventually-successful TorBox/TMDB response is just as
-// bad as an outright failure if it blows the aggregator's own timeout.
+// Caps how long a live request waits on TorBox/TMDB before giving up.
 function withTimeout(promise, ms) {
-  // Promise.race does not cancel the loser. If `promise` goes on to reject
-  // after the timeout branch has already won the race, nothing is watching
-  // it anymore — that's an unhandled rejection, which crashes the entire
-  // Node process on modern defaults (not just this one request). Attach a
-  // no-op catch directly to the original promise so a late rejection is
-  // silently absorbed instead of taking the whole server down.
+  // Promise.race doesn't cancel the loser — catch it separately so a late
+  // rejection can't become an unhandled rejection and crash the process.
   promise.catch(() => {});
   return Promise.race([
     promise,
@@ -73,10 +41,7 @@ function withTimeout(promise, ms) {
   ]);
 }
 
-// Every fetch() in this file used to be uncancellable — Promise.race (above)
-// stops US from waiting past a deadline, but a slow-not-failed TorBox/TMDB
-// response kept running in the background regardless, tying up a connection
-// for nothing. This actually aborts it.
+// fetch() with a real, cancelling timeout via AbortController.
 async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -87,19 +52,13 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
   }
 }
 
-// Randomizes a retry delay instead of using a flat one. When TMDB
-// rate-limits a burst of simultaneous requests, fixed backoff means they
-// all retry in near lockstep and re-trigger the same limit; spreading them
-// out avoids that.
+// Randomized backoff so retries don't all land at once.
 function jitter(baseMs, spread = 0.4) {
   const delta = baseMs * spread;
   return Math.round(baseMs - delta / 2 + Math.random() * delta);
 }
 
-// Runs fn() over items with at most `limit` in flight at once, instead of
-// firing all of them simultaneously via Promise.all. A slow/retrying item
-// only occupies one worker slot rather than competing for TMDB alongside
-// every other torrent in the library at the same time.
+// Like Promise.all but caps how many run concurrently.
 async function mapWithConcurrency(items, limit, fn) {
   const results = new Array(items.length);
   let next = 0;
@@ -222,9 +181,7 @@ app.get('/', (req, res) => {
 // ── Type detection ────────────────────────────────────────────────────────────
 
 function detectTypeFromName(rawName) {
-  // Normalize dot/underscore separators to spaces first — release names like
-  // "Season.4" or "Complete.Series" otherwise never match \s*-based patterns,
-  // since \s only matches actual whitespace, not literal dots.
+  // \s doesn't match literal dots, so normalize separators first.
   const name = rawName.replace(/[\._]/g, ' ');
   if (/\bS\d{1,2}E\d{1,2}\b/i.test(name)) return 'series';
   if (/\bS\d{1,2}\b/i.test(name)) return 'series';
@@ -250,12 +207,8 @@ function detectTypeFromName(rawName) {
   return 'movie';
 }
 
-// Language-independent fallback: rather than trying to enumerate every
-// language's word for "season" forever, check whether multiple files INSIDE
-// the torrent follow an episode-numbering convention (S01E01, 1x01). Episode
-// numbering is used almost universally across release groups regardless of
-// what language the outer torrent name uses for "Season" — so this catches
-// gaps in the name-based word list without needing to guess every language.
+// Language-independent fallback: 2+ files with S01E01-style numbering means
+// series, regardless of what language the outer torrent name uses.
 function looksLikeSeriesFromFiles(files) {
   if (!files || !files.length) return false;
   const episodePattern = /\bS\d{1,2}[\s\-\._]*E\d{1,2}\b|\b\d{1,2}x\d{1,2}\b/i;
@@ -288,10 +241,8 @@ async function resolveSeriesType(tmdbId, apiKey) {
   }
 }
 
-// ── Title cleaning: earliest-junk-marker-wins ─────────────────────────────────
-// Instead of stripping patterns in a fixed sequence (which breaks whenever one
-// pattern consumes text another pattern needed), we scan ALL junk patterns at
-// once and cut the title at whichever one starts earliest in the string.
+// ── Title cleaning: cuts at whichever junk pattern starts earliest, instead
+// of a fixed sequence (which breaks when one pattern eats text another needs)
 
 function firstMatchIndex(str, pattern, minIndex) {
   const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
@@ -304,8 +255,7 @@ function firstMatchIndex(str, pattern, minIndex) {
   return -1;
 }
 
-// minIndex: 1 means "ignore a match at position 0" — used for patterns that
-// could legitimately be the first word of a real title (e.g. a movie called "1917").
+// minIndex 1 skips a match at position 0 (e.g. a movie titled "1917").
 const JUNK_PATTERNS = [
   { pattern: /\bS\d{1,2}(E\d{1,2})?\b/i, minIndex: 0 },
   { pattern: /\b\d{1,2}x\d{1,2}\b/i, minIndex: 0 },
@@ -366,14 +316,8 @@ function wordsOf(str) {
   return (str || '').toLowerCase().match(/[a-z0-9]+/g) || [];
 }
 
-// ── TMDB matching cascade ───────────────────────────────────────────────────
-// Tries progressively looser matching strategies instead of requiring one
-// exact match: exact → ignore leading article → pre-colon/dash portion →
-// fuzzy word overlap (with a year-proximity adjustment). There is NO
-// "single result found, so trust it" shortcut — a lone TMDB hit is not
-// proof of a correct match. A wrong match is worse than no match at all,
-// since it silently shows the wrong piece of content; every result set,
-// however small, has to clear the same similarity bar.
+// ── TMDB matching: exact → no article → pre-colon → fuzzy word overlap with
+// year adjustment. No single-result shortcut — a wrong match is worse than none.
 
 function pickBestMatch(results, title, year) {
   if (!results.length) return null;
@@ -488,11 +432,7 @@ async function getImdbId(tmdbId, type, apiKey, retries = 3) {
   return null;
 }
 
-// Reverse of getImdbId: given an imdbId we already have (from an incoming
-// stream request), get the canonical title back from TMDB in one call. Used
-// by the stream handler's cold-index fallback — we already know exactly
-// which title we're looking for, so candidate torrents can be checked with
-// a local word-overlap comparison instead of a per-torrent TMDB search.
+// Reverse of getImdbId — gets a title back from an imdbId, for the stream fallback.
 async function findByImdbId(imdbId, type, apiKey, retries = 2) {
   const cache = getCache(apiKey);
   const cacheKey = `find:${imdbId}:${type}`;
@@ -538,17 +478,8 @@ async function getTorboxLibrary(apiKey, retries = 2) {
     return cache.torboxLibrary;
   }
 
-  // Same stale-while-revalidate pattern getTorrentIndex already uses, which
-  // this was missing until now: once we have SOMETHING cached, TTL expiry
-  // alone never blocks a caller on a live fetch — serve the stale library
-  // and refresh in the background instead. A torrent library doesn't change
-  // drastically minute to minute, and "briefly stale" beats "live request
-  // blocked on a network call." This matters here specifically because
-  // torboxLibrary and torrentIndex share the same 1hr TTL and get built
-  // together, so they tend to go stale at the same moment — previously
-  // that meant BOTH the index (already protected) and the library
-  // (not protected until now) needed a fresh TorBox call before a request
-  // depending on the fallback could return.
+  // Same stale-while-revalidate as getTorrentIndex — serve stale, refresh
+  // in the background, never block on TTL expiry alone.
   if (cache.torboxLibrary) {
     if (!cache.torboxLibraryRefreshing) {
       cache.torboxLibraryRefreshing = true;
@@ -559,17 +490,14 @@ async function getTorboxLibrary(apiKey, retries = 2) {
     return cache.torboxLibrary;
   }
 
-  // Nothing cached at all yet — first-ever call for this key, no choice
-  // but to wait on a real fetch.
+  // Nothing cached yet — must wait on a real fetch.
   return fetchTorboxLibrary(apiKey, retries);
 }
 
 async function fetchTorboxLibrary(apiKey, retries) {
   const cache = getCache(apiKey);
 
-  // Multiple callers can land here around the same moment — the background
-  // rebuild plus one or more live fallbacks. Without this, each fires its
-  // own independent TorBox request. Share one.
+  // Share one in-flight fetch instead of firing duplicates.
   if (cache.torboxLibraryPromise) return cache.torboxLibraryPromise;
 
   cache.torboxLibraryPromise = (async () => {
@@ -587,10 +515,7 @@ async function fetchTorboxLibrary(apiKey, retries) {
         if (i < retries - 1) await new Promise(r => setTimeout(r, jitter(400)));
       }
     }
-    // Every attempt failed. Serve the last-known-good library instead of
-    // throwing, if we have one — a stale library beats every caller
-    // (rebuildTorrentIndex, the stream fallback, /debug) crashing because
-    // TorBox had one bad moment. Only throw if nothing's cached yet.
+    // Fall back to stale on total failure; only throw if nothing's cached.
     if (cache.torboxLibrary) return cache.torboxLibrary;
     throw new Error('TorBox library unavailable and nothing cached yet');
   })();
@@ -602,20 +527,9 @@ async function fetchTorboxLibrary(apiKey, retries) {
   }
 }
 
-// Builds the torrent → TMDB/IMDB mapping ONCE per cache cycle instead of
-// redoing it live on every single catalog/stream request. Without this, a
-// stream request would re-scan the whole library and re-run TMDB matching
-// on every request, which can easily exceed a tight aggregator timeout
-// (AIOStreams defaults to 3s) and reads as "the addon randomly doesn't
-// return streams" even though it would eventually have.
-//
-// Stale-while-revalidate: a request is NEVER blocked on a full rebuild.
-// A warm-but-expired index is served immediately while a fresh copy builds
-// in the background. A fully cold index (e.g. right after a deploy or a
-// cold start wipes the in-memory cache) is treated the same way — that
-// request gets an empty result right away instead of waiting, and the
-// index is ready for the next one. One possibly-empty response right after
-// a restart beats ever risking a timeout.
+// Precomputes the torrent → TMDB/IMDB mapping once per cycle instead of live
+// per-request. Stale-while-revalidate: never blocks — serves whatever's
+// cached (even empty) while a fresh copy builds in the background.
 async function getTorrentIndex(apiKey) {
   const cache = getCache(apiKey);
   const now = Date.now();
@@ -637,15 +551,8 @@ async function rebuildTorrentIndex(apiKey) {
   const cache = getCache(apiKey);
   let torrents;
   try {
-    // Deliberately fetchTorboxLibrary directly here, not getTorboxLibrary.
-    // getTorboxLibrary's stale-while-revalidate is right for a live request
-    // (speed matters more than freshness) but wrong here: a rebuild's whole
-    // job is to catch up with reality, so it needs a genuine fresh attempt
-    // rather than being handed back the same old snapshot the previous
-    // rebuild already used. Without this, adding something new to the
-    // library could get missed for an extra full cache cycle — the rebuild
-    // "runs" but silently reuses stale data, and the index's own TTL still
-    // resets as if it had actually refreshed.
+    // fetchTorboxLibrary directly, not getTorboxLibrary — a rebuild needs
+    // genuinely fresh data, not stale-while-revalidate's cached copy.
     torrents = await fetchTorboxLibrary(apiKey, 2);
   } catch (e) {
     console.error('rebuildTorrentIndex: could not get TorBox library, index left as-is:', e.message);
@@ -676,14 +583,8 @@ async function rebuildTorrentIndex(apiKey) {
 
   let entries;
   try {
-    // Bounded concurrency instead of firing every torrent at TMDB at once —
-    // a slow/retrying torrent only ties up one of REBUILD_CONCURRENCY slots
-    // rather than piling on top of every other lookup simultaneously. The
-    // outer timeout is a safety net for a truly pathological case (a bug,
-    // not just slow API calls — those are already bounded per-call by
-    // fetchWithTimeout): without it, one stuck item could keep
-    // torrentIndexRefreshing stuck "true" forever and block all future
-    // rebuild attempts.
+    // Bounded concurrency instead of firing every torrent at once; the
+    // outer timeout stops one stuck item from wedging the rebuild forever.
     entries = await withTimeout(mapWithConcurrency(torrents, REBUILD_CONCURRENCY, matchOne), 60000);
   } catch (e) {
     console.error('rebuildTorrentIndex: gave up waiting on the batch, keeping previous index:', e.message);
@@ -697,11 +598,7 @@ async function rebuildTorrentIndex(apiKey) {
 }
 
 function formatStreamDescription(filename, title, season, episode, filesize) {
-  // "4k" and "2160p" mean the same thing; normalize immediately so
-  // everything downstream (the label below, and resolutionLabel, which
-  // bingeGroup is built from) treats a file tagged either way identically
-  // instead of "4k" falling through to unknown or getting its own
-  // separate bingeGroup bucket.
+  // 4k and 2160p are the same thing — normalize so labeling/bingeGroup match.
   const rawRes = filename.match(/\b(2160p|4k|1080p|720p|576p|480p)\b/i)?.[1] ||
                  title.match(/\b(2160p|4k|1080p|720p|576p|480p)\b/i)?.[1] || null;
   const res = rawRes && rawRes.toLowerCase() === '4k' ? '2160p' : rawRes;
@@ -724,10 +621,7 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
 
   const episodeTag = (season !== null && episode !== null)
     ? ` • S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}` : '';
-  // Raw filename first, unmodified — this is what release-name parsers used by
-  // aggregators (AIOStreams etc.) are actually built and tested against, so it
-  // gives them the cleanest possible material to verify title/season/episode
-  // themselves, ahead of our own decorated, human-readable lines below.
+  // Raw filename first — aggregator parsers verify against this directly.
   const line0 = filename || null;
   const line1 = title ? `🎬 ${title}${episodeTag}` : null;
   const line2 = resIcon;
@@ -744,8 +638,7 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
   const line5 = [sizeStr, containerStr].filter(Boolean).join(' ➤ ');
   const description = [line0, line1, line2, line3, line4, line5].filter(Boolean).join('\n');
 
-  // Plain, identifier-safe resolution label for the caller to build a
-  // bingeGroup from — separate from resIcon, which is emoji-decorated for display.
+  // Plain label for bingeGroup, separate from the emoji display version.
   const resolutionLabel = res ? res.toLowerCase() : 'unknown';
 
   return { description, resolutionLabel };
@@ -830,22 +723,11 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     let pairs = buildPairs(indexed);
 
     if (!pairs.length) {
-      // No playable file from the (possibly stale) precomputed index —
-      // either this show isn't indexed yet (cold start) or, just as
-      // likely, it IS indexed but none of ITS known torrents happen to
-      // contain this specific episode (e.g. that episode's torrent was
-      // only added to the library after the last rebuild — the show-level
-      // match succeeds but the file-level match doesn't). Either way, try
-      // one targeted, live check before giving up: get the real title for
-      // this imdbId and the current library — independent calls, run
-      // together instead of stacked — then match locally and re-check for
-      // the file.
-      //
-      // The whole attempt is capped at 6s. TorBox/TMDB being outright down
-      // was already handled by the try/catch around this whole handler —
-      // this covers them being merely slow, which is just as bad for a
-      // live request against a tight aggregator timeout, but wouldn't have
-      // thrown to trigger that catch.
+      // Index doesn't have this episode yet (cold, or indexed but this
+      // specific file wasn't). Try one live check: real title for this
+      // imdbId, matched against the current library. Capped at 7s —
+      // outright failures are caught by the handler's own try/catch;
+      // this covers TorBox/TMDB being merely slow instead.
       try {
         pairs = await withTimeout((async () => {
           const [targetMeta, library] = await Promise.all([
@@ -863,12 +745,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
             if (!torrentWords.length) return false;
             const overlap = targetWords.filter(w => torrentWords.includes(w)).length;
             if (overlap / Math.max(targetWords.length, torrentWords.length) < 0.6) return false;
-            // Word overlap alone lets a same-titled but different-year entry
-            // through (a remake, a different show entirely) — the primary
-            // index path guards against exactly this via pickBestMatch's
-            // year-proximity check; do the same here. Skip the check only
-            // when we can't extract a year from one side or the other,
-            // rather than rejecting a legitimate match for missing data.
+            // Word overlap alone lets a different-year remake through — check year too.
             const torrentYear = extractYear(torrent.name);
             if (targetYear && torrentYear && Math.abs(targetYear - torrentYear) > 1) return false;
             return true;
@@ -896,9 +773,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
         name: '👑 Library ⚡️',
         description,
         behaviorHints: {
-          // Lets the client auto-select "the same quality tier" for the next
-          // episode on auto-advance, instead of falling back to whatever it
-          // picks by default when there's nothing to match against.
+          // Groups by quality so auto-advance matches tiers.
           bingeGroup: `torbox-library-${resolutionLabel}`,
           filename
         }
@@ -912,10 +787,51 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
   }
 });
 
-// Self-serve diagnostics — shows every torrent's detected type, cleaned title,
-// TMDB match (or the exact reason it failed to match) without needing debug code added ad hoc.
+// Self-serve diagnostics — shows each torrent's detected type, cleaned
+// title, TMDB match, or the exact reason it failed to match.
+function renderDebugHtml(type, results) {
+  const ok = results.filter(r => !r.issue).length;
+  const rows = results.map(r => `
+    <div class="row ${r.issue ? 'warn' : 'ok'}">
+      <div class="torrent">${r.torrent}</div>
+      <div class="fields">
+        <span><b>Type:</b> ${r.detectedType}</span>
+        ${r.cleanedTitle ? `<span><b>Title:</b> ${r.cleanedTitle}</span>` : ''}
+        ${r.extractedYear ? `<span><b>Year:</b> ${r.extractedYear}</span>` : ''}
+        ${r.tmdbMatch ? `<span><b>TMDB:</b> ${r.tmdbMatch} (${r.tmdbId})</span>` : ''}
+        ${r.imdbId ? `<span><b>IMDB:</b> ${r.imdbId}</span>` : ''}
+      </div>
+      ${r.issue ? `<div class="issue">⚠️ ${r.issue}</div>` : ''}
+    </div>`).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Debug: ${type}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f0f0f; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; max-width: 700px; margin: 0 auto; }
+    h1 { font-size: 20px; margin-bottom: 4px; text-transform: capitalize; }
+    .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
+    .row { background: #1a1a1a; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; border-left: 3px solid #059669; }
+    .row.warn { border-left-color: #d97706; }
+    .torrent { font-size: 13px; color: #ddd; word-break: break-all; margin-bottom: 8px; }
+    .fields { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: #999; }
+    .fields b { color: #ccc; font-weight: 600; }
+    .issue { color: #f59e0b; font-size: 12px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Debug: ${type}</h1>
+  <p class="subtitle">${ok} of ${results.length} matched</p>
+  ${rows}
+</body>
+</html>`;
+}
+
 app.get('/:apiKey/debug/:type', async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
   try {
     const { apiKey, type } = req.params;
     const torrentType = type === 'anime' ? 'series' : type;
@@ -947,7 +863,12 @@ app.get('/:apiKey/debug/:type', async (req, res) => {
       })
     );
 
-    res.json(results);
+    if (req.query.format === 'json') {
+      res.setHeader('Content-Type', 'application/json');
+      return res.json(results);
+    }
+    res.setHeader('Content-Type', 'text/html');
+    res.send(renderDebugHtml(type, results));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
