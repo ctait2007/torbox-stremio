@@ -161,6 +161,9 @@ app.get('/', (req, res) => {
     .install-btn { width: 100%; background: #059669; border: none; border-radius: 8px; padding: 10px; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 8px; transition: background 0.2s; text-decoration: none; display: block; text-align: center; }
     .install-btn:hover { background: #047857; }
     .note { color: #666; font-size: 12px; margin-top: 16px; line-height: 1.5; }
+    .links { margin-top: 20px; }
+    .link-btn { display: block; background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: #ccc; font-size: 13px; text-align: center; text-decoration: none; margin-top: 8px; transition: background 0.2s; }
+    .link-btn:hover { background: #333; }
   </style>
 </head>
 <body>
@@ -176,6 +179,13 @@ app.get('/', (req, res) => {
       <button class="copy-btn" onclick="copyUrl()">Copy URL</button>
       <a class="install-btn" id="install-btn" href="#">Install in Stremio</a>
       <p class="note">Paste the URL into Stremio → Addons → Community Addons → paste URL. Or click Install to open Stremio directly.</p>
+      <div class="links">
+        <div class="result-label">Quick links:</div>
+        <a class="link-btn" id="link-movie" href="#" target="_blank">Debug: Movies</a>
+        <a class="link-btn" id="link-series" href="#" target="_blank">Debug: Series</a>
+        <a class="link-btn" id="link-anime" href="#" target="_blank">Debug: Anime</a>
+        <a class="link-btn" id="link-refresh" href="#" target="_blank">Refresh Cache</a>
+      </div>
     </div>
   </div>
   <script>
@@ -187,6 +197,10 @@ app.get('/', (req, res) => {
       const stremioUrl = manifestUrl.replace('https://', 'stremio://');
       document.getElementById('url-box').textContent = manifestUrl;
       document.getElementById('install-btn').href = stremioUrl;
+      document.getElementById('link-movie').href = base + '/' + key + '/debug/movie';
+      document.getElementById('link-series').href = base + '/' + key + '/debug/series';
+      document.getElementById('link-anime').href = base + '/' + key + '/debug/anime';
+      document.getElementById('link-refresh').href = base + '/' + key + '/refresh';
       document.getElementById('result').style.display = 'block';
     }
     function copyUrl() {
@@ -940,11 +954,16 @@ app.get('/:apiKey/debug/:type', async (req, res) => {
   }
 });
 
-app.get('/:apiKey/refresh', (req, res) => {
+app.get('/:apiKey/refresh', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   const { apiKey } = req.params;
-  if (caches.has(apiKey)) caches.delete(apiKey);
-  res.json({ success: true, message: 'Cache cleared' });
+  caches.delete(apiKey);
+  try {
+    await withTimeout(rebuildTorrentIndex(apiKey), 30000);
+    res.json({ success: true, message: 'Cache cleared and rebuilt' });
+  } catch (e) {
+    res.json({ success: true, message: 'Cache cleared; rebuild still in progress, check again shortly' });
+  }
 });
 
 app.get('/configure', (req, res) => res.redirect('/'));
