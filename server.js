@@ -162,12 +162,13 @@ app.get('/', (req, res) => {
     .url-box { background: #111; border: 1px solid #333; border-radius: 8px; padding: 12px 16px; font-size: 13px; word-break: break-all; color: #a78bfa; margin-bottom: 12px; }
     .copy-btn { width: 100%; background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: #fff; font-size: 14px; cursor: pointer; transition: background 0.2s; }
     .copy-btn:hover { background: #333; }
-    .install-btn { width: 100%; background: #059669; border: none; border-radius: 8px; padding: 10px; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 8px; transition: background 0.2s; text-decoration: none; display: block; text-align: center; }
-    .install-btn:hover { background: #047857; }
+    .error { color: #f87171; font-size: 12px; margin-top: 8px; display: none; }
     .note { color: #666; font-size: 12px; margin-top: 16px; line-height: 1.5; }
     .links { margin-top: 20px; }
-    .link-btn { display: block; background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: #ccc; font-size: 13px; text-align: center; text-decoration: none; margin-top: 8px; transition: background 0.2s; }
+    .link-btn { width: 100%; display: block; background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: #ccc; font-size: 13px; text-align: center; text-decoration: none; margin-top: 8px; cursor: pointer; transition: background 0.2s; }
     .link-btn:hover { background: #333; }
+    .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #555; border-top-color: #fff; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -176,25 +177,27 @@ app.get('/', (req, res) => {
     <p class="subtitle">Stream your TorBox library in Stremio</p>
     <label for="apikey">Your TorBox API Key</label>
     <input type="text" id="apikey" placeholder="Paste your TorBox API key here" autocomplete="off" autocorrect="off" spellcheck="false">
+    <div class="error" id="error">Please enter your TorBox API key</div>
     <button onclick="generate()">Generate Addon URL</button>
     <div class="result" id="result">
       <div class="result-label">Your personalised addon URL:</div>
       <div class="url-box" id="url-box"></div>
       <button class="copy-btn" onclick="copyUrl()">Copy URL</button>
-      <a class="install-btn" id="install-btn" href="#">Install in Stremio</a>
-      <p class="note">Paste the URL into Stremio → Addons → Community Addons → paste URL. Or click Install to open Stremio directly.</p>
+      <p class="note">Paste the URL into Stremio → Addons → Community Addons → paste URL.</p>
       <div class="links">
         <div class="result-label">Quick links — bookmark <span id="hub-link"></span> to get back here without re-entering your key:</div>
         <a class="link-btn" id="link-movie" href="#">Debug: Movies</a>
         <a class="link-btn" id="link-series" href="#">Debug: Series</a>
-        <a class="link-btn" id="link-refresh" href="#">Refresh Cache</a>
+        <button class="link-btn" id="btn-refresh" onclick="refreshCache()">Refresh Cache</button>
       </div>
     </div>
   </div>
   <script>
     async function generate() {
       const key = document.getElementById('apikey').value.trim();
-      if (!key) { alert('Please enter your TorBox API key'); return; }
+      const errorEl = document.getElementById('error');
+      if (!key) { errorEl.style.display = 'block'; return; }
+      errorEl.style.display = 'none';
       const res = await fetch('/encrypt', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key })
       });
@@ -202,10 +205,9 @@ app.get('/', (req, res) => {
       const base = window.location.origin;
       const manifestUrl = base + '/' + token + '/manifest.json';
       document.getElementById('url-box').textContent = manifestUrl;
-      document.getElementById('install-btn').href = manifestUrl.replace('https://', 'stremio://');
       document.getElementById('link-movie').href = base + '/' + token + '/debug/movie';
       document.getElementById('link-series').href = base + '/' + token + '/debug/series';
-      document.getElementById('link-refresh').href = base + '/' + token + '/refresh';
+      document.getElementById('btn-refresh').dataset.url = base + '/' + token + '/refresh';
       document.getElementById('hub-link').textContent = base + '/' + token;
       document.getElementById('result').style.display = 'block';
     }
@@ -216,6 +218,18 @@ app.get('/', (req, res) => {
         btn.textContent = 'Copied!';
         setTimeout(() => btn.textContent = 'Copy URL', 2000);
       });
+    }
+    async function refreshCache() {
+      const btn = document.getElementById('btn-refresh');
+      btn.innerHTML = '<span class="spinner"></span>Refreshing...';
+      try {
+        const res = await fetch(btn.dataset.url);
+        const data = await res.json();
+        btn.textContent = '✓ ' + data.message;
+      } catch (e) {
+        btn.textContent = '✗ Refresh failed';
+      }
+      setTimeout(() => { btn.textContent = 'Refresh Cache'; }, 4000);
     }
     document.getElementById('apikey').addEventListener('keydown', e => {
       if (e.key === 'Enter') generate();
@@ -839,7 +853,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
 function renderDebugHtml(type, results) {
   const ok = results.filter(r => !r.issue).length;
   const rows = results.map(r => `
-    <div class="row ${r.issue ? 'warn' : 'ok'}">
+    <div class="row ${r.issue ? 'warn' : 'ok'}" data-search="${(r.torrent + ' ' + (r.cleanedTitle || '')).toLowerCase().replace(/"/g, '')}">
       <div class="torrent">${r.torrent}</div>
       <div class="fields">
         <span><b>Type:</b> ${r.detectedType}</span>
@@ -861,7 +875,9 @@ function renderDebugHtml(type, results) {
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0f0f0f; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; max-width: 700px; margin: 0 auto; }
     h1 { font-size: 20px; margin-bottom: 4px; text-transform: capitalize; }
-    .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
+    .subtitle { color: #888; font-size: 13px; margin-bottom: 16px; }
+    input#search { width: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 10px 14px; color: #fff; font-size: 14px; outline: none; margin-bottom: 16px; }
+    input#search:focus { border-color: #7c3aed; }
     .row { background: #1a1a1a; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; border-left: 3px solid #059669; }
     .row.warn { border-left-color: #d97706; }
     .torrent { font-size: 13px; color: #ddd; word-break: break-all; margin-bottom: 8px; }
@@ -873,7 +889,16 @@ function renderDebugHtml(type, results) {
 <body>
   <h1>Debug: ${type}</h1>
   <p class="subtitle">${ok} of ${results.length} matched</p>
-  ${rows}
+  <input type="text" id="search" placeholder="Search...">
+  <div id="rows">${rows}</div>
+  <script>
+    document.getElementById('search').addEventListener('input', e => {
+      const q = e.target.value.toLowerCase();
+      document.querySelectorAll('#rows .row').forEach(row => {
+        row.style.display = row.dataset.search.includes(q) ? '' : 'none';
+      });
+    });
+  </script>
 </body>
 </html>`;
 }
@@ -938,7 +963,12 @@ app.get('/configure', (req, res) => res.redirect('/'));
 
 app.get('/:key', (req, res) => {
   const { key } = req.params;
-  if (!decryptApiKey(key)) return res.redirect('/');
+  const realKey = decryptApiKey(key);
+  if (!realKey) return res.redirect('/');
+  const cache = getCache(realKey);
+  const status = cache.torrentIndex && cache.torrentIndexExpiry
+    ? `${cache.torrentIndex.length} items · synced ${Math.max(0, Math.round((Date.now() - (cache.torrentIndexExpiry - TORBOX_CACHE_TTL)) / 60000))}m ago`
+    : 'Not yet synced — visit a catalog or hit refresh';
   const base = `${req.protocol}://${req.get('host')}`;
   res.setHeader('Content-Type', 'text/html');
   res.send(`<!DOCTYPE html>
@@ -951,23 +981,48 @@ app.get('/:key', (req, res) => {
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0f0f0f; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
     .card { background: #1a1a1a; border-radius: 16px; padding: 40px; max-width: 480px; width: 100%; }
-    h1 { font-size: 24px; margin-bottom: 24px; }
+    h1 { font-size: 24px; margin-bottom: 8px; }
+    .status { color: #888; font-size: 12px; margin-bottom: 20px; }
     .url-box { background: #111; border: 1px solid #333; border-radius: 8px; padding: 12px 16px; font-size: 13px; word-break: break-all; color: #a78bfa; margin-bottom: 12px; }
-    .install-btn { width: 100%; background: #059669; border: none; border-radius: 8px; padding: 10px; color: #fff; font-size: 14px; font-weight: 600; margin-top: 8px; text-decoration: none; display: block; text-align: center; }
-    .link-btn { display: block; background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: #ccc; font-size: 13px; text-align: center; text-decoration: none; margin-top: 8px; }
+    .copy-btn { width: 100%; background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: #fff; font-size: 14px; cursor: pointer; }
+    .link-btn { width: 100%; display: block; background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: #ccc; font-size: 13px; text-align: center; text-decoration: none; margin-top: 8px; cursor: pointer; }
     .result-label { font-size: 13px; color: #aaa; margin: 20px 0 8px; }
+    .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #555; border-top-color: #fff; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>👑 TorBox Addon Hub</h1>
+    <div class="status">${status}</div>
     <div class="url-box">${base}/${key}/manifest.json</div>
-    <a class="install-btn" href="${(base + '/' + key + '/manifest.json').replace('https://', 'stremio://')}">Install in Stremio</a>
+    <button class="copy-btn" onclick="copyUrl()">Copy URL</button>
     <div class="result-label">Quick links:</div>
     <a class="link-btn" href="${base}/${key}/debug/movie">Debug: Movies</a>
     <a class="link-btn" href="${base}/${key}/debug/series">Debug: Series</a>
-    <a class="link-btn" href="${base}/${key}/refresh">Refresh Cache</a>
+    <button class="link-btn" id="btn-refresh" onclick="refreshCache()">Refresh Cache</button>
   </div>
+  <script>
+    function copyUrl() {
+      navigator.clipboard.writeText('${base}/${key}/manifest.json').then(() => {
+        const btn = document.querySelector('.copy-btn');
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = 'Copy URL', 2000);
+      });
+    }
+    async function refreshCache() {
+      const btn = document.getElementById('btn-refresh');
+      btn.innerHTML = '<span class="spinner"></span>Refreshing...';
+      try {
+        const res = await fetch('${base}/${key}/refresh');
+        const data = await res.json();
+        btn.textContent = '✓ ' + data.message;
+      } catch (e) {
+        btn.textContent = '✗ Refresh failed';
+      }
+      setTimeout(() => { btn.textContent = 'Refresh Cache'; }, 4000);
+    }
+  </script>
 </body>
 </html>`);
 });
