@@ -19,6 +19,44 @@ process.on('SIGTERM', () => {
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 
+const crypto = require('crypto');
+if (!process.env.URL_ENCRYPTION_SECRET) {
+  console.error('WARNING: URL_ENCRYPTION_SECRET not set — using an insecure default. Set this in Render env vars.');
+}
+const ENCRYPTION_KEY = crypto.createHash('sha256').update(process.env.URL_ENCRYPTION_SECRET || 'change-me').digest();
+
+// Deterministic: the same TorBox key always encrypts to the same token,
+// since the IV is derived from the key + secret rather than random. The IV
+// travels with the ciphertext (standard practice) so decryption doesn't
+// need to already know the key to recover it.
+function encryptApiKey(key) {
+  const iv = crypto.createHash('sha256').update(key).update(ENCRYPTION_KEY).digest().subarray(0, 16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(key, 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, encrypted]).toString('base64url');
+}
+
+function decryptApiKey(token) {
+  try {
+    const data = Buffer.from(token, 'base64url');
+    const iv = data.subarray(0, 16);
+    const decipher = crypto.createDecipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+    return Buffer.concat([decipher.update(data.subarray(16)), decipher.final()]).toString('utf8');
+  } catch (e) {
+    return null;
+  }
+}
+
+// Every :apiKey route param arrives encrypted from the URL — decrypt it
+// once here so route handlers keep using req.params.apiKey as the real
+// TorBox key, unchanged.
+app.param('apiKey', (req, res, next, token) => {
+  const key = decryptApiKey(token);
+  if (!key) return res.status(400).json({ error: 'Invalid or corrupted key' });
+  req.params.apiKey = key;
+  next();
+});
+
 // TorBox keys to pre-warm the cache for on boot. Optional.
 const WARM_API_KEYS = (process.env.WARM_API_KEYS || '')
   .split(',')
@@ -90,6 +128,13 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   next();
 });
+app.use(express.json());
+
+app.post('/encrypt', (req, res) => {
+  const key = (req.body?.key || '').trim();
+  if (!key) return res.status(400).json({ error: 'Missing key' });
+  res.json({ token: encryptApiKey(key) });
+});
 
 // ── Config page ───────────────────────────────────────────────────────────────
 
@@ -139,27 +184,29 @@ app.get('/', (req, res) => {
       <a class="install-btn" id="install-btn" href="#">Install in Stremio</a>
       <p class="note">Paste the URL into Stremio → Addons → Community Addons → paste URL. Or click Install to open Stremio directly.</p>
       <div class="links">
-        <div class="result-label">Quick links:</div>
-        <a class="link-btn" id="link-movie" href="#" target="_blank">Debug: Movies</a>
-        <a class="link-btn" id="link-series" href="#" target="_blank">Debug: Series</a>
-        <a class="link-btn" id="link-anime" href="#" target="_blank">Debug: Anime</a>
-        <a class="link-btn" id="link-refresh" href="#" target="_blank">Refresh Cache</a>
+        <div class="result-label">Quick links — bookmark <span id="hub-link"></span> to get back here without re-entering your key:</div>
+        <a class="link-btn" id="link-movie" href="#">Debug: Movies</a>
+        <a class="link-btn" id="link-series" href="#">Debug: Series</a>
+        <a class="link-btn" id="link-refresh" href="#">Refresh Cache</a>
       </div>
     </div>
   </div>
   <script>
-    function generate() {
+    async function generate() {
       const key = document.getElementById('apikey').value.trim();
       if (!key) { alert('Please enter your TorBox API key'); return; }
+      const res = await fetch('/encrypt', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key })
+      });
+      const { token } = await res.json();
       const base = window.location.origin;
-      const manifestUrl = base + '/' + key + '/manifest.json';
-      const stremioUrl = manifestUrl.replace('https://', 'stremio://');
+      const manifestUrl = base + '/' + token + '/manifest.json';
       document.getElementById('url-box').textContent = manifestUrl;
-      document.getElementById('install-btn').href = stremioUrl;
-      document.getElementById('link-movie').href = base + '/' + key + '/debug/movie';
-      document.getElementById('link-series').href = base + '/' + key + '/debug/series';
-      document.getElementById('link-anime').href = base + '/' + key + '/debug/anime';
-      document.getElementById('link-refresh').href = base + '/' + key + '/refresh';
+      document.getElementById('install-btn').href = manifestUrl.replace('https://', 'stremio://');
+      document.getElementById('link-movie').href = base + '/' + token + '/debug/movie';
+      document.getElementById('link-series').href = base + '/' + token + '/debug/series';
+      document.getElementById('link-refresh').href = base + '/' + token + '/refresh';
+      document.getElementById('hub-link').textContent = base + '/' + token;
       document.getElementById('result').style.display = 'block';
     }
     function copyUrl() {
@@ -888,6 +935,42 @@ app.get('/:apiKey/refresh', async (req, res) => {
 });
 
 app.get('/configure', (req, res) => res.redirect('/'));
+
+app.get('/:key', (req, res) => {
+  const { key } = req.params;
+  if (!decryptApiKey(key)) return res.redirect('/');
+  const base = `${req.protocol}://${req.get('host')}`;
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TorBox Addon Hub</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f0f0f; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .card { background: #1a1a1a; border-radius: 16px; padding: 40px; max-width: 480px; width: 100%; }
+    h1 { font-size: 24px; margin-bottom: 24px; }
+    .url-box { background: #111; border: 1px solid #333; border-radius: 8px; padding: 12px 16px; font-size: 13px; word-break: break-all; color: #a78bfa; margin-bottom: 12px; }
+    .install-btn { width: 100%; background: #059669; border: none; border-radius: 8px; padding: 10px; color: #fff; font-size: 14px; font-weight: 600; margin-top: 8px; text-decoration: none; display: block; text-align: center; }
+    .link-btn { display: block; background: #222; border: 1px solid #444; border-radius: 8px; padding: 10px; color: #ccc; font-size: 13px; text-align: center; text-decoration: none; margin-top: 8px; }
+    .result-label { font-size: 13px; color: #aaa; margin: 20px 0 8px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>👑 TorBox Addon Hub</h1>
+    <div class="url-box">${base}/${key}/manifest.json</div>
+    <a class="install-btn" href="${(base + '/' + key + '/manifest.json').replace('https://', 'stremio://')}">Install in Stremio</a>
+    <div class="result-label">Quick links:</div>
+    <a class="link-btn" href="${base}/${key}/debug/movie">Debug: Movies</a>
+    <a class="link-btn" href="${base}/${key}/debug/series">Debug: Series</a>
+    <a class="link-btn" href="${base}/${key}/refresh">Refresh Cache</a>
+  </div>
+</body>
+</html>`);
+});
 
 app.listen(3000, () => {
   console.log('TorBox addon running');
