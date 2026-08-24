@@ -224,10 +224,12 @@ app.get('/', (req, res) => {
       btn.innerHTML = '<span class="spinner"></span>Refreshing...';
       try {
         const res = await fetch(btn.dataset.url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         btn.textContent = '✓ ' + data.message;
       } catch (e) {
-        btn.textContent = '✗ Refresh failed';
+        console.error('Refresh failed:', e);
+        btn.textContent = '✗ Failed: ' + e.message;
       }
       setTimeout(() => { btn.textContent = 'Refresh Cache'; }, 4000);
     }
@@ -955,6 +957,7 @@ app.get('/:apiKey/refresh', async (req, res) => {
     await withTimeout(rebuildTorrentIndex(apiKey), 30000);
     res.json({ success: true, message: 'Cache cleared and rebuilt' });
   } catch (e) {
+    console.error('/refresh: rebuild did not finish in time:', e.message);
     res.json({ success: true, message: 'Cache cleared; rebuild still in progress, check again shortly' });
   }
 });
@@ -1015,10 +1018,12 @@ app.get('/:key', (req, res) => {
       btn.innerHTML = '<span class="spinner"></span>Refreshing...';
       try {
         const res = await fetch('${base}/${key}/refresh');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         btn.textContent = '✓ ' + data.message;
       } catch (e) {
-        btn.textContent = '✗ Refresh failed';
+        console.error('Refresh failed:', e);
+        btn.textContent = '✗ Failed: ' + e.message;
       }
       setTimeout(() => { btn.textContent = 'Refresh Cache'; }, 4000);
     }
