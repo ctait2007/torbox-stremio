@@ -130,9 +130,17 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-app.post('/encrypt', (req, res) => {
+app.post('/encrypt', async (req, res) => {
   const key = (req.body?.key || '').trim();
   if (!key) return res.status(400).json({ error: 'Missing key' });
+  try {
+    const check = await fetchWithTimeout('https://api.torbox.app/v1/api/torrents/mylist', {
+      headers: { Authorization: `Bearer ${key}` }
+    }, 5000);
+    if (!check.ok) return res.status(400).json({ error: 'Invalid TorBox API key' });
+  } catch (e) {
+    return res.status(400).json({ error: 'Could not verify key with TorBox — try again' });
+  }
   res.json({ token: encryptApiKey(key) });
 });
 
@@ -177,7 +185,7 @@ app.get('/', (req, res) => {
     <p class="subtitle">Stream your TorBox library in Stremio</p>
     <label for="apikey">Your TorBox API Key</label>
     <input type="text" id="apikey" placeholder="Paste your TorBox API key here" autocomplete="off" autocorrect="off" spellcheck="false">
-    <div class="error" id="error">Please enter your TorBox API key</div>
+    <div class="error" id="error"></div>
     <button onclick="generate()">Generate Addon URL</button>
     <div class="result" id="result">
       <div class="result-label">Your personalised addon URL:</div>
@@ -196,12 +204,14 @@ app.get('/', (req, res) => {
     async function generate() {
       const key = document.getElementById('apikey').value.trim();
       const errorEl = document.getElementById('error');
-      if (!key) { errorEl.style.display = 'block'; return; }
+      if (!key) { errorEl.textContent = 'Please enter your TorBox API key'; errorEl.style.display = 'block'; return; }
       errorEl.style.display = 'none';
       const res = await fetch('/encrypt', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key })
       });
-      const { token } = await res.json();
+      const data = await res.json();
+      if (!res.ok) { errorEl.textContent = data.error; errorEl.style.display = 'block'; return; }
+      const token = data.token;
       const base = window.location.origin;
       const manifestUrl = base + '/' + token + '/manifest.json';
       document.getElementById('url-box').textContent = manifestUrl;
@@ -954,7 +964,11 @@ app.get('/:apiKey/refresh', async (req, res) => {
   const { apiKey } = req.params;
   caches.delete(apiKey);
   try {
-    await withTimeout(rebuildTorrentIndex(apiKey), 30000);
+    // Render's own platform timeout (not configurable) sits around 15-30s —
+    // this must respond well under that or Render kills the connection
+    // before this code gets a chance to, which looks identical to a client
+    // network failure and logs nothing.
+    await withTimeout(rebuildTorrentIndex(apiKey), 12000);
     res.json({ success: true, message: 'Cache cleared and rebuilt' });
   } catch (e) {
     console.error('/refresh: rebuild did not finish in time:', e.message);
