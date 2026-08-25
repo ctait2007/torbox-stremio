@@ -148,6 +148,7 @@ app.post('/encrypt', async (req, res) => {
 
 app.get('/', (req, res) => {
   res.setHeader('Content-Type', 'text/html');
+  res.setHeader('Cache-Control', 'no-store');
   res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -635,9 +636,22 @@ async function rebuildTorrentIndex(apiKey) {
   const matchOne = async (torrent) => {
     try {
       const torrentType = detectType(torrent);
-      const title = cleanTitle(torrent.name);
-      const year = extractYear(torrent.name);
-      const tmdb = await searchTmdb(title, year, torrentType, apiKey);
+      let title = cleanTitle(torrent.name);
+      let year = extractYear(torrent.name);
+      let tmdb = await searchTmdb(title, year, torrentType, apiKey);
+
+      // Some torrents have random/unmatchable names but properly-named
+      // files inside — retry against a few file names before giving up.
+      if (!tmdb) {
+        const videoFiles = (torrent.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name));
+        for (const file of videoFiles.slice(0, 3)) {
+          const fileName = file.short_name || file.name;
+          title = cleanTitle(fileName);
+          year = extractYear(fileName);
+          tmdb = await searchTmdb(title, year, torrentType, apiKey);
+          if (tmdb) break;
+        }
+      }
       if (!tmdb) return null;
 
       let finalType = torrentType;
@@ -812,16 +826,19 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
           if (!targetWords.length) return [];
           const targetDate = targetMeta.release_date || targetMeta.first_air_date || '';
           const targetYear = targetDate ? parseInt(targetDate.slice(0, 4)) : null;
+          const matchesTarget = (name) => {
+            const words = wordsOf(cleanTitle(name));
+            if (!words.length) return false;
+            const overlap = targetWords.filter(w => words.includes(w)).length;
+            if (overlap / Math.max(targetWords.length, words.length) < 0.6) return false;
+            const nameYear = extractYear(name);
+            return !(targetYear && nameYear && Math.abs(targetYear - nameYear) > 1);
+          };
           const candidates = library.filter(torrent => {
             if (detectType(torrent) !== torrentType) return false;
-            const torrentWords = wordsOf(cleanTitle(torrent.name));
-            if (!torrentWords.length) return false;
-            const overlap = targetWords.filter(w => torrentWords.includes(w)).length;
-            if (overlap / Math.max(targetWords.length, torrentWords.length) < 0.6) return false;
-            // Word overlap alone lets a different-year remake through — check year too.
-            const torrentYear = extractYear(torrent.name);
-            if (targetYear && torrentYear && Math.abs(targetYear - torrentYear) > 1) return false;
-            return true;
+            if (matchesTarget(torrent.name)) return true;
+            // Torrent name might be random/unmatchable — check file names too.
+            return (torrent.files || []).some(f => matchesTarget(f.short_name || f.name));
           });
           return buildPairs(candidates);
         })(), 7000);
@@ -927,17 +944,32 @@ app.get('/:apiKey/debug/:type', async (req, res) => {
         if (detected !== torrentType) {
           return { torrent: torrent.name, detectedType: detected, issue: `detected as ${detected}, not ${torrentType}` };
         }
-        const title = cleanTitle(torrent.name);
-        const year = extractYear(torrent.name);
-        const tmdb = await searchTmdb(title, year, torrentType, apiKey);
+        let title = cleanTitle(torrent.name);
+        let year = extractYear(torrent.name);
+        let tmdb = await searchTmdb(title, year, torrentType, apiKey);
+        let viaFile = false;
+
+        // Some torrents have unmatchable/random names but properly-named
+        // files inside — retry against a few file names before giving up.
         if (!tmdb) {
-          return { torrent: torrent.name, detectedType: detected, cleanedTitle: title, extractedYear: year, issue: 'No TMDB match found' };
+          const videoFiles = (torrent.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name));
+          for (const file of videoFiles.slice(0, 3)) {
+            const fileName = file.short_name || file.name;
+            const fTitle = cleanTitle(fileName);
+            const fYear = extractYear(fileName);
+            tmdb = await searchTmdb(fTitle, fYear, torrentType, apiKey);
+            if (tmdb) { title = fTitle; year = fYear; viaFile = true; break; }
+          }
+        }
+
+        if (!tmdb) {
+          return { torrent: torrent.name, detectedType: detected, cleanedTitle: title, extractedYear: year, issue: 'No TMDB match found (checked torrent name and file names)' };
         }
         const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
         return {
           torrent: torrent.name,
           detectedType: detected,
-          cleanedTitle: title,
+          cleanedTitle: title + (viaFile ? ' (via file name)' : ''),
           extractedYear: year,
           tmdbMatch: tmdb.title || tmdb.name,
           tmdbId: tmdb.id,
@@ -952,6 +984,7 @@ app.get('/:apiKey/debug/:type', async (req, res) => {
       return res.json(results);
     }
     res.setHeader('Content-Type', 'text/html');
+    res.setHeader('Cache-Control', 'no-store');
     res.send(renderDebugHtml(type, results));
   } catch (err) {
     console.error(err);
@@ -988,6 +1021,7 @@ app.get('/:key', (req, res) => {
     : 'Not yet synced — visit a catalog or hit refresh';
   const base = `${req.protocol}://${req.get('host')}`;
   res.setHeader('Content-Type', 'text/html');
+  res.setHeader('Cache-Control', 'no-store');
   res.send(`<!DOCTYPE html>
 <html>
 <head>
