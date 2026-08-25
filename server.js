@@ -1,5 +1,6 @@
 const express = require('express');
 const app = express();
+app.set('trust proxy', true);
 const baseManifest = require('./manifest.json');
 
 // Unhandled rejections crash the process by default on modern Node — log and keep running.
@@ -286,8 +287,7 @@ function detectTypeFromName(rawName) {
 function looksLikeSeriesFromFiles(files) {
   if (!files || !files.length) return false;
   const episodePattern = /\bS\d{1,2}[\s\-\._]*E\d{1,2}\b|\b\d{1,2}x\d{1,2}\b/i;
-  const matches = files.filter(f => episodePattern.test(f.name || f.short_name || ''));
-  return matches.length >= 2;
+  return files.some(f => episodePattern.test(f.name || f.short_name || ''));
 }
 
 function detectType(torrent) {
@@ -1055,7 +1055,7 @@ app.get('/:key', (req, res) => {
   </div>
   <script>
     function copyUrl() {
-      navigator.clipboard.writeText('${base}/${key}/manifest.json').then(() => {
+      navigator.clipboard.writeText(window.location.origin + '/${key}/manifest.json').then(() => {
         const btn = document.querySelector('.copy-btn');
         btn.textContent = 'Copied!';
         setTimeout(() => btn.textContent = 'Copy URL', 2000);
@@ -1065,7 +1065,7 @@ app.get('/:key', (req, res) => {
       const btn = document.getElementById('btn-refresh');
       btn.innerHTML = '<span class="spinner"></span>Refreshing...';
       try {
-        const res = await fetch('${base}/${key}/refresh');
+        const res = await fetch(window.location.origin + '/${key}/refresh');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         btn.textContent = '✓ ' + data.message;
