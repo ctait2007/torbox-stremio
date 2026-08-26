@@ -196,8 +196,7 @@ app.get('/', (req, res) => {
       <p class="note">Paste the URL into Stremio → Addons → Community Addons → paste URL.</p>
       <div class="links">
         <div class="result-label">Quick links — bookmark <span id="hub-link"></span> to get back here without re-entering your key:</div>
-        <a class="link-btn" id="link-movie" href="#">Debug: Movies</a>
-        <a class="link-btn" id="link-series" href="#">Debug: Series</a>
+        <a class="link-btn" id="link-debug" href="#">Debug</a>
         <button class="link-btn" id="btn-refresh" onclick="refreshCache()">Refresh Cache</button>
       </div>
     </div>
@@ -217,8 +216,7 @@ app.get('/', (req, res) => {
       const base = window.location.origin;
       const manifestUrl = base + '/' + token + '/manifest.json';
       document.getElementById('url-box').textContent = manifestUrl;
-      document.getElementById('link-movie').href = base + '/' + token + '/debug/movie';
-      document.getElementById('link-series').href = base + '/' + token + '/debug/series';
+      document.getElementById('link-debug').href = base + '/' + token + '/debug';
       document.getElementById('btn-refresh').dataset.url = base + '/' + token + '/refresh';
       document.getElementById('hub-link').textContent = base + '/' + token;
       document.getElementById('result').style.display = 'block';
@@ -877,12 +875,20 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
   }
 });
 
-// Self-serve diagnostics — shows each torrent's detected type, cleaned
-// title, TMDB match, or the exact reason it failed to match.
-function renderDebugHtml(type, results) {
+// Self-serve diagnostics — shows every torrent's detected type, cleaned
+// title, TMDB match, or the exact reason it failed to match. Movies/series/
+// errors are one filterable, color-coded list instead of separate pages.
+function renderDebugHtml(results) {
   const ok = results.filter(r => !r.issue).length;
-  const rows = results.map(r => `
-    <div class="row ${r.issue ? 'warn' : 'ok'}" data-search="${(r.torrent + ' ' + (r.cleanedTitle || '')).toLowerCase().replace(/"/g, '')}">
+  const counts = {
+    movie: results.filter(r => !r.issue && r.detectedType === 'movie').length,
+    series: results.filter(r => !r.issue && r.detectedType === 'series').length,
+    error: results.filter(r => r.issue).length
+  };
+  const rows = results.map(r => {
+    const cat = r.issue ? 'error' : r.detectedType; // movie | series | error
+    return `
+    <div class="row ${cat}" data-cat="${cat}" data-search="${(r.torrent + ' ' + (r.cleanedTitle || '')).toLowerCase().replace(/"/g, '')}">
       <div class="torrent">${r.torrent}</div>
       <div class="fields">
         <span><b>Type:</b> ${r.detectedType}</span>
@@ -892,23 +898,29 @@ function renderDebugHtml(type, results) {
         ${r.imdbId ? `<span><b>IMDB:</b> ${r.imdbId}</span>` : ''}
       </div>
       ${r.issue ? `<div class="issue">⚠️ ${r.issue}</div>` : ''}
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Debug: ${type}</title>
+  <title>Debug</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0f0f0f; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; max-width: 700px; margin: 0 auto; }
-    h1 { font-size: 20px; margin-bottom: 4px; text-transform: capitalize; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
     .subtitle { color: #888; font-size: 13px; margin-bottom: 16px; }
-    input#search { width: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 10px 14px; color: #fff; font-size: 14px; outline: none; margin-bottom: 16px; }
+    input#search { width: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 10px 14px; color: #fff; font-size: 14px; outline: none; margin-bottom: 12px; }
     input#search:focus { border-color: #7c3aed; }
-    .row { background: #1a1a1a; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; border-left: 3px solid #059669; }
-    .row.warn { border-left-color: #d97706; }
+    .filters { display: flex; gap: 8px; margin-bottom: 16px; }
+    .filter-btn { flex: 1; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 8px; color: #999; font-size: 12px; text-align: center; cursor: pointer; user-select: none; }
+    .filter-btn.active { color: #fff; border-color: #7c3aed; background: #251a3d; }
+    .row { background: #1a1a1a; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; border-left: 3px solid #444; }
+    .row.movie { border-left-color: #3b82f6; }
+    .row.series { border-left-color: #059669; }
+    .row.error { border-left-color: #dc2626; }
     .torrent { font-size: 13px; color: #ddd; word-break: break-all; margin-bottom: 8px; }
     .fields { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: #999; }
     .fields b { color: #ccc; font-weight: 600; }
@@ -916,15 +928,34 @@ function renderDebugHtml(type, results) {
   </style>
 </head>
 <body>
-  <h1>Debug: ${type}</h1>
-  <p class="subtitle">${ok} of ${results.length} matched</p>
+  <h1>Debug</h1>
+  <p class="subtitle">${ok} of ${results.length} matched · ${counts.movie} movies · ${counts.series} series · ${counts.error} errors</p>
   <input type="text" id="search" placeholder="Search...">
+  <div class="filters">
+    <div class="filter-btn active" data-filter="all">All</div>
+    <div class="filter-btn" data-filter="movie">Movies</div>
+    <div class="filter-btn" data-filter="series">Series</div>
+    <div class="filter-btn" data-filter="error">Errors</div>
+  </div>
   <div id="rows">${rows}</div>
   <script>
-    document.getElementById('search').addEventListener('input', e => {
-      const q = e.target.value.toLowerCase();
+    let activeFilter = 'all';
+    const searchEl = document.getElementById('search');
+    function applyFilters() {
+      const q = searchEl.value.toLowerCase();
       document.querySelectorAll('#rows .row').forEach(row => {
-        row.style.display = row.dataset.search.includes(q) ? '' : 'none';
+        const matchesSearch = row.dataset.search.includes(q);
+        const matchesFilter = activeFilter === 'all' || row.dataset.cat === activeFilter;
+        row.style.display = matchesSearch && matchesFilter ? '' : 'none';
+      });
+    }
+    searchEl.addEventListener('input', applyFilters);
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeFilter = btn.dataset.filter;
+        applyFilters();
       });
     });
   </script>
@@ -932,21 +963,17 @@ function renderDebugHtml(type, results) {
 </html>`;
 }
 
-app.get('/:apiKey/debug/:type', async (req, res) => {
+app.get('/:apiKey/debug', async (req, res) => {
   try {
-    const { apiKey, type } = req.params;
-    const torrentType = type === 'anime' ? 'series' : type;
+    const { apiKey } = req.params;
     const torrents = await getTorboxLibrary(apiKey);
 
     const results = await Promise.all(
       torrents.map(async (torrent) => {
         const detected = detectType(torrent);
-        if (detected !== torrentType) {
-          return { torrent: torrent.name, detectedType: detected, issue: `detected as ${detected}, not ${torrentType}` };
-        }
         let title = cleanTitle(torrent.name);
         let year = extractYear(torrent.name);
-        let tmdb = await searchTmdb(title, year, torrentType, apiKey);
+        let tmdb = await searchTmdb(title, year, detected, apiKey);
         let viaFile = false;
 
         // Some torrents have unmatchable/random names but properly-named
@@ -957,7 +984,7 @@ app.get('/:apiKey/debug/:type', async (req, res) => {
             const fileName = file.short_name || file.name;
             const fTitle = cleanTitle(fileName);
             const fYear = extractYear(fileName);
-            tmdb = await searchTmdb(fTitle, fYear, torrentType, apiKey);
+            tmdb = await searchTmdb(fTitle, fYear, detected, apiKey);
             if (tmdb) { title = fTitle; year = fYear; viaFile = true; break; }
           }
         }
@@ -965,7 +992,7 @@ app.get('/:apiKey/debug/:type', async (req, res) => {
         if (!tmdb) {
           return { torrent: torrent.name, detectedType: detected, cleanedTitle: title, extractedYear: year, issue: 'No TMDB match found (checked torrent name and file names)' };
         }
-        const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
+        const imdbId = await getImdbId(tmdb.id, detected, apiKey);
         return {
           torrent: torrent.name,
           detectedType: detected,
@@ -985,12 +1012,15 @@ app.get('/:apiKey/debug/:type', async (req, res) => {
     }
     res.setHeader('Content-Type', 'text/html');
     res.setHeader('Cache-Control', 'no-store');
-    res.send(renderDebugHtml(type, results));
+    res.send(renderDebugHtml(results));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
+
+// Old per-type links (movie/series/anime) still work, redirected to the merged page.
+app.get('/:apiKey/debug/:type', (req, res) => res.redirect(`/${req.params.apiKey}/debug`));
 
 app.get('/:apiKey/refresh', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
@@ -1049,8 +1079,7 @@ app.get('/:key', (req, res) => {
     <div class="url-box">${base}/${key}/manifest.json</div>
     <button class="copy-btn" onclick="copyUrl()">Copy URL</button>
     <div class="result-label">Quick links:</div>
-    <a class="link-btn" href="${base}/${key}/debug/movie">Debug: Movies</a>
-    <a class="link-btn" href="${base}/${key}/debug/series">Debug: Series</a>
+    <a class="link-btn" href="${base}/${key}/debug">Debug</a>
     <button class="link-btn" id="btn-refresh" onclick="refreshCache()">Refresh Cache</button>
   </div>
   <script>
