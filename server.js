@@ -580,6 +580,7 @@ async function fetchTorboxLibrary(apiKey, retries) {
         }, 5000);
         const json = await res.json();
         cache.torboxLibrary = json.data || [];
+        console.log('TORRENT KEYS:', Object.keys(cache.torboxLibrary[0] || {}));
         cache.torboxLibraryExpiry = Date.now() + TORBOX_CACHE_TTL;
         return cache.torboxLibrary;
       } catch (e) {
