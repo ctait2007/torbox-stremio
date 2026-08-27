@@ -580,7 +580,6 @@ async function fetchTorboxLibrary(apiKey, retries) {
         }, 5000);
         const json = await res.json();
         cache.torboxLibrary = json.data || [];
-        console.log('TORRENT KEYS:', Object.keys(cache.torboxLibrary[0] || {}));
         cache.torboxLibraryExpiry = Date.now() + TORBOX_CACHE_TTL;
         return cache.torboxLibrary;
       } catch (e) {
@@ -632,7 +631,13 @@ async function rebuildTorrentIndex(apiKey) {
     return cache.torrentIndex || [];
   }
 
+  // Reuse matched entries by id — new or previously-failed torrents
+  // (absent here, since failures were never stored) get reprocessed.
+  const existingById = new Map((cache.torrentIndex || []).map(e => [e.torrent.id, e]));
+
   const matchOne = async (torrent) => {
+    const existing = existingById.get(torrent.id);
+    if (existing) return existing;
     try {
       const torrentType = detectType(torrent);
       let title = cleanTitle(torrent.name);
@@ -932,7 +937,7 @@ function renderDebugHtml(results, apiKey) {
 </head>
 <body>
   <h1>Debug</h1>
-  <p class="subtitle">${ok} of ${results.length} matched · ${counts.movie} movies · ${counts.series} series · ${counts.error} errors</p>
+  <p class="subtitle">${ok} of ${results.length} matched</p>
   <input type="text" id="search" placeholder="Search...">
   <div class="filters">
     <div class="filter-btn active" data-filter="all">All (${results.length})</div>
@@ -1151,17 +1156,16 @@ app.get('/:apiKey/debug/:type', (req, res) => res.redirect(`/${req.params.apiKey
 app.get('/:apiKey/refresh', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   const { apiKey } = req.params;
-  caches.delete(apiKey);
   try {
     // Render's own platform timeout (not configurable) sits around 15-30s —
     // this must respond well under that or Render kills the connection
     // before this code gets a chance to, which looks identical to a client
     // network failure and logs nothing.
     await withTimeout(rebuildTorrentIndex(apiKey), 12000);
-    res.json({ success: true, message: 'Cache cleared and rebuilt' });
+    res.json({ success: true, message: 'Library synced' });
   } catch (e) {
     console.error('/refresh: rebuild did not finish in time:', e.message);
-    res.json({ success: true, message: 'Cache cleared; rebuild still in progress, check again shortly' });
+    res.json({ success: true, message: 'Sync started; still in progress, check again shortly' });
   }
 });
 
@@ -1172,10 +1176,8 @@ app.get('/:key', (req, res) => {
   const realKey = decryptApiKey(key);
   if (!realKey) return res.redirect('/');
   const cache = getCache(realKey);
-  const movieCount = cache.torrentIndex ? cache.torrentIndex.filter(e => e.torrentType === 'movie').length : 0;
-  const seriesCount = cache.torrentIndex ? cache.torrentIndex.length - movieCount : 0;
   const status = cache.torrentIndex && cache.torrentIndexExpiry
-    ? `${cache.torrentIndex.length} items (${movieCount} movies, ${seriesCount} series) · synced ${Math.max(0, Math.round((Date.now() - (cache.torrentIndexExpiry - TORBOX_CACHE_TTL)) / 60000))}m ago`
+    ? `${cache.torrentIndex.length} items · synced ${Math.max(0, Math.round((Date.now() - (cache.torrentIndexExpiry - TORBOX_CACHE_TTL)) / 60000))}m ago`
     : 'Not yet synced — visit a catalog or hit refresh';
   const base = `${req.protocol}://${req.get('host')}`;
   res.setHeader('Content-Type', 'text/html');
