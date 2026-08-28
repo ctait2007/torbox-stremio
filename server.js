@@ -952,7 +952,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
           });
         }
       } catch (e) {
-        console.error(`Search-and-fetch gave up for ${id}:`, e.message);
+        console.error(`Search-and-fetch gave up for ${id}:`, e.message, e.cause ? `(cause: ${e.cause.code || e.cause.message || e.cause})` : '');
       }
     }
 
