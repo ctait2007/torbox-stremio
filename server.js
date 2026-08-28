@@ -835,6 +835,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       .map(entry => entry.torrent);
 
     let pairs = buildPairs(indexed);
+    let torboxSeemsSlow = false;
 
     if (!pairs.length) {
       // Index doesn't have this episode yet (cold, or indexed but this
@@ -872,10 +873,15 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       } catch (e) {
         console.error(`Targeted fallback gave up for ${id}:`, e.message);
         pairs = [];
+        if (e.message.includes('timed out')) torboxSeemsSlow = true;
       }
     }
 
-    if (!pairs.length) {
+    if (!pairs.length && torboxSeemsSlow) {
+      console.error(`Skipping search-and-fetch for ${id} — TorBox already timed out this request`);
+    }
+
+    if (!pairs.length && !torboxSeemsSlow) {
       // Truly nothing local — search TorBox itself and fetch the best
       // candidate (cached preferred) instead of giving up outright.
       try {
@@ -894,7 +900,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
           if (!added) return null;
 
           return { torrent: added, isCached: cachedResults.length > 0 };
-        })(), 15000);
+        })(), 8000);
 
         if (fetched) {
           const videoFiles = (fetched.torrent.files || []).filter(f =>
