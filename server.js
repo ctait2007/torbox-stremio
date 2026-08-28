@@ -801,6 +801,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     const id = parts[0];
     const season = parts[1] ? parseInt(parts[1]) : null;
     const episode = parts[2] ? parseInt(parts[2]) : null;
+    console.error(`Stream request: ${type} ${rawId}`);
 
     const buildPairs = (torrents) => {
       const found = [];
@@ -888,17 +889,27 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
         const fetched = await withTimeout((async () => {
           const targetMeta = await findByImdbId(id, torrentType, apiKey);
           const title = targetMeta && (targetMeta.title || targetMeta.name);
-          if (!title) return null;
+          if (!title) {
+            console.error(`Search-and-fetch: no TMDB title resolved for ${id}`);
+            return null;
+          }
 
           const results = await searchTorboxTorrents(title, apiKey);
-          if (!results.length) return null;
+          if (!results.length) {
+            console.error(`Search-and-fetch: TorBox search returned nothing for "${title}"`);
+            return null;
+          }
 
           const cachedResults = results.filter(r => r.cached);
           const best = (cachedResults.length ? cachedResults : results)[0];
           const magnet = best.magnet || `magnet:?xt=urn:btih:${best.hash}`;
           const added = await addTorrentToTorbox(magnet, apiKey);
-          if (!added) return null;
+          if (!added) {
+            console.error(`Search-and-fetch: createtorrent returned no data for "${title}"`);
+            return null;
+          }
 
+          console.error(`Search-and-fetch: added "${title}" to TorBox (cached: ${cachedResults.length > 0})`);
           return { torrent: added, isCached: cachedResults.length > 0 };
         })(), 8000);
 
