@@ -622,8 +622,8 @@ async function getTorrentIndex(apiKey) {
 // Searches TorBox's own index (not just this account's library) and flags
 // which hits are already cached — used when nothing local matches.
 async function searchTorboxTorrents(query, apiKey) {
-  const params = new URLSearchParams({ query, check_cache: 'true' });
-  const res = await fetchWithTimeout(`https://api.torbox.app/v1/api/torrents/search?${params}`, {
+  const url = `https://search-api.torbox.app/torrents/search/${encodeURIComponent(query)}?check_cache=true`;
+  const res = await fetchWithTimeout(url, {
     headers: { Authorization: `Bearer ${apiKey}` }
   }, 10000);
   const json = await res.json();
