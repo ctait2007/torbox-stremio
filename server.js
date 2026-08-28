@@ -627,6 +627,11 @@ async function searchTorboxTorrents(query, apiKey) {
     headers: { Authorization: `Bearer ${apiKey}` }
   }, 10000);
   const json = await res.json();
+  if (!res.ok || !json.data || !json.data.length) {
+    // A real "no matches" and a wrong endpoint/param/auth error can look
+    // identical here otherwise — this makes the actual response visible.
+    console.error(`TorBox search (status ${res.status}) for "${query}":`, JSON.stringify(json).slice(0, 500));
+  }
   return json.data || [];
 }
 
