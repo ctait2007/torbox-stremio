@@ -577,10 +577,11 @@ async function fetchTorboxLibrary(apiKey, retries) {
       try {
         const res = await fetchWithTimeout('https://api.torbox.app/v1/api/torrents/mylist', {
           headers: { Authorization: `Bearer ${apiKey}` }
-        }, 5000);
+        }, 8000);
         const json = await res.json();
         cache.torboxLibrary = json.data || [];
         cache.torboxLibraryExpiry = Date.now() + TORBOX_CACHE_TTL;
+        cache.torboxLibraryStale = false;
         return cache.torboxLibrary;
       } catch (e) {
         console.error(`TorBox library fetch attempt ${i + 1} failed:`, e.message);
@@ -588,7 +589,13 @@ async function fetchTorboxLibrary(apiKey, retries) {
       }
     }
     // Fall back to stale on total failure; only throw if nothing's cached.
-    if (cache.torboxLibrary) return cache.torboxLibrary;
+    // Flagged so callers (like /refresh) can say so instead of reporting
+    // a clean sync when nothing was actually re-checked.
+    if (cache.torboxLibrary) {
+      cache.torboxLibraryStale = true;
+      console.error('TorBox library fetch exhausted retries — serving stale data');
+      return cache.torboxLibrary;
+    }
     throw new Error('TorBox library unavailable and nothing cached yet');
   })();
 
@@ -1176,6 +1183,9 @@ app.get('/:apiKey/refresh', async (req, res) => {
     // before this code gets a chance to, which looks identical to a client
     // network failure and logs nothing.
     await withTimeout(rebuildTorrentIndex(apiKey), 12000);
+    if (getCache(apiKey).torboxLibraryStale) {
+      return res.json({ success: false, message: "TorBox didn't respond in time to actually sync — showing existing data, try again shortly" });
+    }
     res.json({ success: true, message: 'Library synced' });
   } catch (e) {
     console.error('/refresh: rebuild did not finish in time:', e.message);
