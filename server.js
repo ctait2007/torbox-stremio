@@ -785,12 +785,26 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
         const seasonStr = String(season).padStart(2, '0');
         const episodeStr = String(episode).padStart(2, '0');
         const pattern = new RegExp(`(S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}|${parseInt(season)}[xX]${episodeStr})`, 'i');
+        // Anime releases very often number episodes bare, with no season
+        // marker at all (e.g. "Frieren - 01 [1080p]") — fallback for when
+        // the western S0xE0x/1x01 pattern above finds nothing.
+        const barePattern = new RegExp(`[\\s\\-_]0*${episode}(?:v\\d+)?[\\s\\-_.\\[\\(]`, 'i');
         for (const torrent of torrents) {
-          const filtered = (torrent.files || []).filter(f =>
+          let filtered = (torrent.files || []).filter(f =>
             pattern.test(f.name) &&
             /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
           );
+          if (!filtered.length) {
+            filtered = (torrent.files || []).filter(f =>
+              barePattern.test(f.name) &&
+              /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
+            );
+          }
           filtered.forEach(f => found.push({ file: f, torrent }));
+        }
+        if (!found.length && torrents.length) {
+          const sample = torrents.flatMap(t => (t.files || []).map(f => f.short_name || f.name)).slice(0, 10);
+          console.error(`No file matched S${seasonStr}E${episodeStr} (or bare ep ${episode}) among: ${sample.join(', ')}`);
         }
       } else {
         for (const torrent of torrents) {
