@@ -788,7 +788,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
         // Anime releases very often number episodes bare, with no season
         // marker at all (e.g. "Frieren - 01 [1080p]") — fallback for when
         // the western S0xE0x/1x01 pattern above finds nothing.
-        const barePattern = new RegExp(`[\\s\\-_]0*${episode}(?:v\\d+)?[\\s\\-_.\\[\\(]`, 'i');
+        const barePattern = new RegExp(`(?:[\\s\\-_.]|\\bEp?(?:isode)?\\.?\\s*)0*${episode}(?:v\\d+)?(?:[\\s\\-_.\\[\\(]|$)`, 'i');
         for (const torrent of torrents) {
           let filtered = (torrent.files || []).filter(f =>
             pattern.test(f.name) &&
