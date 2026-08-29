@@ -619,34 +619,6 @@ async function getTorrentIndex(apiKey) {
   return cache.torrentIndex || []; // serve stale/empty, refresh happening in the background
 }
 
-// Searches TorBox's own index (not just this account's library) and flags
-// which hits are already cached — used when nothing local matches.
-async function searchTorboxTorrents(query, apiKey) {
-  const url = `https://search-api.torbox.app/torrents/search/${encodeURIComponent(query)}?check_cache=true`;
-  const res = await fetchWithTimeout(url, {
-    headers: { Authorization: `Bearer ${apiKey}` }
-  }, 10000);
-  const json = await res.json();
-  if (!res.ok || !json.data || !json.data.length) {
-    // A real "no matches" and a wrong endpoint/param/auth error can look
-    // identical here otherwise — this makes the actual response visible.
-    console.error(`TorBox search (status ${res.status}) for "${query}":`, JSON.stringify(json).slice(0, 500));
-  }
-  return json.data || [];
-}
-
-// Adds a torrent to the account by magnet link.
-async function addTorrentToTorbox(magnet, apiKey) {
-  const form = new URLSearchParams({ magnet });
-  const res = await fetchWithTimeout('https://api.torbox.app/v1/api/torrents/createtorrent', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: form
-  }, 10000);
-  const json = await res.json();
-  return json.data || null;
-}
-
 async function rebuildTorrentIndex(apiKey) {
   const cache = getCache(apiKey);
   let torrents;
@@ -806,7 +778,6 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     const id = parts[0];
     const season = parts[1] ? parseInt(parts[1]) : null;
     const episode = parts[2] ? parseInt(parts[2]) : null;
-    console.error(`Stream request: ${type} ${rawId}`);
 
     const buildPairs = (torrents) => {
       const found = [];
@@ -841,7 +812,6 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       .map(entry => entry.torrent);
 
     let pairs = buildPairs(indexed);
-    let torboxSeemsSlow = false;
 
     if (!pairs.length) {
       // Index doesn't have this episode yet (cold, or indexed but this
@@ -879,80 +849,6 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       } catch (e) {
         console.error(`Targeted fallback gave up for ${id}:`, e.message);
         pairs = [];
-        if (e.message.includes('timed out')) torboxSeemsSlow = true;
-      }
-    }
-
-    if (!pairs.length && torboxSeemsSlow) {
-      console.error(`Skipping search-and-fetch for ${id} — TorBox already timed out this request`);
-    }
-
-    if (!pairs.length && !torboxSeemsSlow) {
-      // Truly nothing local — search TorBox itself and fetch the best
-      // candidate (cached preferred) instead of giving up outright.
-      try {
-        const fetched = await withTimeout((async () => {
-          const targetMeta = await findByImdbId(id, torrentType, apiKey);
-          const title = targetMeta && (targetMeta.title || targetMeta.name);
-          if (!title) {
-            console.error(`Search-and-fetch: no TMDB title resolved for ${id}`);
-            return null;
-          }
-
-          const results = await searchTorboxTorrents(title, apiKey);
-          if (!results.length) {
-            console.error(`Search-and-fetch: TorBox search returned nothing for "${title}"`);
-            return null;
-          }
-
-          const cachedResults = results.filter(r => r.cached);
-          const best = (cachedResults.length ? cachedResults : results)[0];
-          const magnet = best.magnet || `magnet:?xt=urn:btih:${best.hash}`;
-          const added = await addTorrentToTorbox(magnet, apiKey);
-          if (!added) {
-            console.error(`Search-and-fetch: createtorrent returned no data for "${title}"`);
-            return null;
-          }
-
-          console.error(`Search-and-fetch: added "${title}" to TorBox (cached: ${cachedResults.length > 0})`);
-          return { torrent: added, isCached: cachedResults.length > 0 };
-        })(), 8000);
-
-        if (fetched) {
-          const videoFiles = (fetched.torrent.files || []).filter(f =>
-            /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-          ).sort((a, b) => (b.size || 0) - (a.size || 0));
-          const file = videoFiles[0];
-
-          if (file) {
-            const { description, resolutionLabel } = formatStreamDescription(
-              file.short_name || file.name || '',
-              cleanTitle(fetched.torrent.name || ''),
-              season, episode,
-              file.size || 0
-            );
-            return res.json({
-              streams: [{
-                url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${apiKey}&torrent_id=${fetched.torrent.id}&file_id=${file.id}&redirect=true`,
-                name: fetched.isCached ? '👑 Library ⚡️' : '👑 Library ⏳',
-                description,
-                behaviorHints: { bingeGroup: `torbox-library-${resolutionLabel}`, filename: file.short_name || file.name }
-              }]
-            });
-          }
-
-          // Added but no files listed yet (still downloading) — nothing
-          // playable exists, so point at the hub instead of a dead link.
-          return res.json({
-            streams: [{
-              url: `${req.protocol}://${req.get('host')}/${apiKey}`,
-              name: '👑 Library ⏳',
-              description: 'Added to TorBox — check back once it finishes downloading'
-            }]
-          });
-        }
-      } catch (e) {
-        console.error(`Search-and-fetch gave up for ${id}:`, e.message, e.cause ? `(cause: ${e.cause.code || e.cause.message || e.cause})` : '');
       }
     }
 
