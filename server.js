@@ -641,10 +641,12 @@ async function rebuildTorrentIndex(apiKey) {
   // Reuse matched entries by id — new or previously-failed torrents
   // (absent here, since failures were never stored) get reprocessed.
   const existingById = new Map((cache.torrentIndex || []).map(e => [e.torrent.id, e]));
+  let reused = 0, processed = 0;
 
   const matchOne = async (torrent) => {
     const existing = existingById.get(torrent.id);
-    if (existing) return existing;
+    if (existing) { reused++; return existing; }
+    processed++;
     try {
       const torrentType = detectType(torrent);
       let title = cleanTitle(torrent.name);
@@ -663,7 +665,10 @@ async function rebuildTorrentIndex(apiKey) {
           if (tmdb) break;
         }
       }
-      if (!tmdb) return null;
+      if (!tmdb) {
+        console.error(`rebuildTorrentIndex: no TMDB match for "${torrent.name}" (id ${torrent.id})`);
+        return null;
+      }
 
       let finalType = torrentType;
       if (torrentType === 'series') {
@@ -671,10 +676,14 @@ async function rebuildTorrentIndex(apiKey) {
       }
 
       const imdbId = await getImdbId(tmdb.id, torrentType, apiKey);
-      if (!imdbId) return null;
+      if (!imdbId) {
+        console.error(`rebuildTorrentIndex: matched "${torrent.name}" to TMDB but no IMDB id (id ${torrent.id})`);
+        return null;
+      }
 
       return { torrent, imdbId, torrentType, finalType, tmdb };
     } catch (e) {
+      console.error(`rebuildTorrentIndex: threw while matching "${torrent.name}" (id ${torrent.id}):`, e.message);
       return null;
     }
   };
@@ -690,6 +699,7 @@ async function rebuildTorrentIndex(apiKey) {
   }
 
   const index = entries.filter(Boolean);
+  console.error(`rebuildTorrentIndex: ${torrents.length} fetched, ${reused} reused, ${processed} newly processed, ${index.length} in final index`);
   cache.torrentIndex = index;
   cache.torrentIndexExpiry = Date.now() + TORBOX_CACHE_TTL;
   return index;
