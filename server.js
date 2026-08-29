@@ -575,7 +575,7 @@ async function fetchTorboxLibrary(apiKey, retries) {
   cache.torboxLibraryPromise = (async () => {
     for (let i = 0; i < retries; i++) {
       try {
-        const res = await fetchWithTimeout('https://api.torbox.app/v1/api/torrents/mylist', {
+        const res = await fetchWithTimeout('https://api.torbox.app/v1/api/torrents/mylist?bypass_cache=true', {
           headers: { Authorization: `Bearer ${apiKey}` }
         }, 8000);
         const json = await res.json();
