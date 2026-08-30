@@ -129,6 +129,23 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   next();
 });
+
+// TorBox webhook receiver — same URL as the hub page but POST, so it
+// works with what's already configured in TorBox's notification settings
+// without needing a separate path. Registered before express.json() below
+// on purpose: this never reads the body at all, and putting it ahead of
+// the parser means a body TorBox sends that the JSON parser doesn't like
+// (malformed, unexpected content-type, etc.) can't get this route rejected
+// with a 400 before the handler even runs — it fires on the POST alone.
+app.post('/:key', (req, res) => {
+  const { key } = req.params;
+  const realKey = decryptApiKey(key);
+  if (!realKey) return res.status(404).json({ error: 'invalid key' });
+  console.error(`Webhook received, triggering rebuild for key ending ...${realKey.slice(-4)}`);
+  rebuildTorrentIndex(realKey).catch(e => console.error('Webhook-triggered rebuild failed:', e.message));
+  res.status(200).json({ ok: true });
+});
+
 app.use(express.json());
 
 app.post('/encrypt', async (req, res) => {
@@ -1204,22 +1221,6 @@ app.get('/:apiKey/refresh', async (req, res) => {
 });
 
 app.get('/configure', (req, res) => res.redirect('/'));
-
-// TorBox webhook receiver — same URL as the hub page but POST, so it
-// works with what's already configured in TorBox's notification settings
-// without needing a separate path. TorBox's own payload is reportedly too
-// generic to identify what changed, so this doesn't try to parse it —
-// any hit just triggers the same diff-aware rebuild /refresh uses, which
-// only re-processes what's actually new. Responds immediately; the
-// rebuild runs in the background so TorBox isn't kept waiting on it.
-app.post('/:key', (req, res) => {
-  const { key } = req.params;
-  const realKey = decryptApiKey(key);
-  if (!realKey) return res.status(404).json({ error: 'invalid key' });
-  console.error(`Webhook received, triggering rebuild for key ending ...${realKey.slice(-4)}`);
-  rebuildTorrentIndex(realKey).catch(e => console.error('Webhook-triggered rebuild failed:', e.message));
-  res.status(200).json({ ok: true });
-});
 
 app.get('/:key', (req, res) => {
   const { key } = req.params;
