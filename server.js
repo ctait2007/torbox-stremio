@@ -1299,4 +1299,14 @@ app.listen(3000, () => {
   for (const key of WARM_API_KEYS) {
     getTorrentIndex(key).catch(e => console.error('Warm-up failed for a configured key:', e.message));
   }
+  // TorBox doesn't currently send a webhook for individual torrent
+  // completions (confirmed via support — still a planned feature on
+  // their end), so this is the practical stand-in: re-check each warmed
+  // account on a timer instead of waiting on a push that isn't coming.
+  // rebuildTorrentIndex's own diffing keeps this cheap when nothing's new.
+  setInterval(() => {
+    for (const key of WARM_API_KEYS) {
+      rebuildTorrentIndex(key).catch(e => console.error('Periodic sync failed for a configured key:', e.message));
+    }
+  }, 15 * 60 * 1000);
 });
