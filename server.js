@@ -133,15 +133,19 @@ app.use((req, res, next) => {
 // TorBox webhook receiver — same URL as the hub page but POST, so it
 // works with what's already configured in TorBox's notification settings
 // without needing a separate path. Registered before express.json() below
-// on purpose: this never reads the body at all, and putting it ahead of
-// the parser means a body TorBox sends that the JSON parser doesn't like
-// (malformed, unexpected content-type, etc.) can't get this route rejected
-// with a 400 before the handler even runs — it fires on the POST alone.
-app.post('/:key', (req, res) => {
+// on purpose, and uses its own text parser (any content-type, never
+// throws) rather than JSON — TorBox support couldn't confirm what a real
+// completion payload looks like, or that one even exists yet, so this
+// logs the raw content-type + body on every hit to find out directly,
+// and still triggers the same diff-aware rebuild regardless of what (if
+// anything) the body contains.
+app.post('/:key', express.text({ type: '*/*' }), (req, res) => {
   const { key } = req.params;
   const realKey = decryptApiKey(key);
   if (!realKey) return res.status(404).json({ error: 'invalid key' });
-  console.error(`Webhook received, triggering rebuild for key ending ...${realKey.slice(-4)}`);
+  const contentType = req.get('content-type') || '(none)';
+  const body = (req.body || '(empty)').toString().slice(0, 500);
+  console.error(`Webhook for key ending ...${realKey.slice(-4)} — Content-Type: ${contentType} — Body: ${body}`);
   rebuildTorrentIndex(realKey).catch(e => console.error('Webhook-triggered rebuild failed:', e.message));
   res.status(200).json({ ok: true });
 });
