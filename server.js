@@ -885,8 +885,21 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
           const matchesTarget = (name) => {
             const words = wordsOf(cleanTitle(name));
             if (!words.length) return false;
-            const overlap = targetWords.filter(w => words.includes(w)).length;
-            if (overlap / Math.max(targetWords.length, words.length) < 0.6) return false;
+            // Containment first: the full target title appearing intact
+            // anywhere in the candidate is a strong signal on its own,
+            // regardless of what trails after it (an episode title,
+            // quality tags, group names) — those shouldn't be able to
+            // hurt a match this clean the way a raw ratio would.
+            let contained = false;
+            for (let i = 0; i <= words.length - targetWords.length; i++) {
+              if (targetWords.every((w, j) => words[i + j] === w)) { contained = true; break; }
+            }
+            if (!contained) {
+              // Fall back to fuzzy overlap for shortened/simplified names
+              // that don't contain the target's exact wording.
+              const overlap = targetWords.filter(w => words.includes(w)).length;
+              if (overlap / Math.max(targetWords.length, words.length) < 0.6) return false;
+            }
             const nameYear = extractYear(name);
             return !(targetYear && nameYear && Math.abs(targetYear - nameYear) > 1);
           };
