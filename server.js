@@ -406,7 +406,7 @@ function normalizeTitle(str) {
 }
 
 function wordsOf(str) {
-  return (str || '').toLowerCase().match(/[a-z0-9]+/g) || [];
+  return (str || '').toLowerCase().replace(/'/g, '').match(/[a-z0-9]+/g) || [];
 }
 
 // ── TMDB matching: exact → no article → pre-colon → fuzzy word overlap with
@@ -549,6 +549,65 @@ async function findByImdbId(imdbId, type, apiKey, retries = 2) {
   }
   cache.tmdb.set(cacheKey, { value: null, expiry: Date.now() + TMDB_CACHE_TTL });
   return null;
+}
+
+// Alternative titles (regional names, romanizations) — tried only when the
+// primary title finds nothing, e.g. TMDB's English title vs. a release
+// using the original-language title instead.
+async function getTmdbAlternativeTitles(tmdbId, type, apiKey) {
+  const cache = getCache(apiKey);
+  const cacheKey = `alt:${tmdbId}:${type}`;
+  const cached = cache.tmdb.get(cacheKey);
+  if (cached && Date.now() < cached.expiry) return cached.value;
+  try {
+    const endpoint = type === 'movie' ? 'movie' : 'tv';
+    const res = await fetchWithTimeout(`https://api.themoviedb.org/3/${endpoint}/${tmdbId}/alternative_titles?api_key=${TMDB_API_KEY}`, {}, 4000);
+    const json = await res.json();
+    // Movie/TV alternative-titles responses use different keys.
+    const titles = (json.titles || json.results || []).map(t => t.title).filter(Boolean);
+    cache.tmdb.set(cacheKey, { value: titles, expiry: Date.now() + TMDB_CACHE_TTL });
+    return titles;
+  } catch (e) {
+    console.error(`TMDB alternative-titles lookup failed for ${tmdbId}:`, e.message);
+    return [];
+  }
+}
+
+// Per-season episode counts — lets a request for season N convert to an
+// absolute episode number (sum of prior seasons + the requested episode),
+// for releases that number continuously instead of restarting each season.
+async function getSeasonEpisodeCounts(tmdbId, apiKey) {
+  const cache = getCache(apiKey);
+  const cacheKey = `seasons:${tmdbId}`;
+  const cached = cache.tmdb.get(cacheKey);
+  if (cached && Date.now() < cached.expiry) return cached.value;
+  try {
+    const res = await fetchWithTimeout(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`, {}, 4000);
+    const json = await res.json();
+    const counts = {};
+    for (const s of json.seasons || []) {
+      if (s.season_number > 0) counts[s.season_number] = s.episode_count || 0;
+    }
+    cache.tmdb.set(cacheKey, { value: counts, expiry: Date.now() + TMDB_CACHE_TTL });
+    return counts;
+  } catch (e) {
+    console.error(`TMDB season-counts lookup failed for ${tmdbId}:`, e.message);
+    return {};
+  }
+}
+
+// Title variants worth trying beyond the literal string: pre-colon/dash
+// (drops a subtitle a release might omit) and no-leading-article — mirrors
+// the same cascade already used for TMDB search matching during rebuild.
+function titleWordVariants(title) {
+  const variants = [];
+  const push = (t) => { const w = wordsOf(t); if (w.length) variants.push(w); };
+  push(title);
+  const preColon = title.split(/[:\-–]/)[0];
+  if (preColon !== title) push(preColon);
+  const noArticle = title.replace(/^(the|a|an)\s+/i, '');
+  if (noArticle !== title) push(noArticle);
+  return variants;
 }
 
 function toMeta(tmdb, imdbId, torrentId, type) {
@@ -817,32 +876,36 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     const season = parts[1] ? parseInt(parts[1]) : null;
     const episode = parts[2] ? parseInt(parts[2]) : null;
 
-    const buildPairs = (torrents) => {
+    const buildPairs = (torrents, episodeToMatch = episode) => {
       const found = [];
-      if (season !== null && episode !== null) {
+      if (season !== null && episodeToMatch !== null) {
         const seasonStr = String(season).padStart(2, '0');
-        const episodeStr = String(episode).padStart(2, '0');
+        const episodeStr = String(episodeToMatch).padStart(2, '0');
         const pattern = new RegExp(`(S${seasonStr}[\\s\\-]*E[\\s\\-]*${episodeStr}|${parseInt(season)}[xX]${episodeStr})`, 'i');
         // Anime releases very often number episodes bare, with no season
         // marker at all (e.g. "Frieren - 01 [1080p]") — fallback for when
         // the western S0xE0x/1x01 pattern above finds nothing.
-        const barePattern = new RegExp(`(?:[\\s\\-_.]|\\bEp?(?:isode)?\\.?\\s*)0*${episode}(?:v\\d+)?(?:[\\s\\-_.\\[\\(]|$)`, 'i');
+        const barePattern = new RegExp(`(?:[\\s\\-_.]|\\bEp?(?:isode)?\\.?\\s*)0*${episodeToMatch}(?:v\\d+)?(?:[\\s\\-_.\\[\\(]|$)`, 'i');
+        // Combined-episode files ("01-02", "01+02", "01~02") containing
+        // the target episode as either endpoint of the range.
+        const rangePattern = /(?:[\s\-_.]|\bEp?(?:isode)?\.?\s*)0*(\d{1,3})\s*[\-+~]\s*0*(\d{1,3})(?:[\s\-_.\[\(]|$)/i;
         for (const torrent of torrents) {
-          let filtered = (torrent.files || []).filter(f =>
-            pattern.test(f.name) &&
-            /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-          );
+          const videoFiles = (torrent.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name));
+          let filtered = videoFiles.filter(f => pattern.test(f.name));
+          if (!filtered.length) filtered = videoFiles.filter(f => barePattern.test(f.name));
           if (!filtered.length) {
-            filtered = (torrent.files || []).filter(f =>
-              barePattern.test(f.name) &&
-              /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name)
-            );
+            filtered = videoFiles.filter(f => {
+              const m = f.name.match(rangePattern);
+              if (!m) return false;
+              const a = parseInt(m[1]), b = parseInt(m[2]);
+              return episodeToMatch >= Math.min(a, b) && episodeToMatch <= Math.max(a, b);
+            });
           }
           filtered.forEach(f => found.push({ file: f, torrent }));
         }
         if (!found.length && torrents.length) {
           const sample = torrents.flatMap(t => (t.files || []).map(f => f.short_name || f.name)).slice(0, 10);
-          console.error(`No file matched S${seasonStr}E${episodeStr} (or bare ep ${episode}) among: ${sample.join(', ')}`);
+          console.error(`No file matched S${seasonStr}E${episodeStr} (or bare/ranged ep ${episodeToMatch}) among: ${sample.join(', ')}`);
         }
       } else {
         for (const torrent of torrents) {
@@ -865,6 +928,23 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
 
     let pairs = buildPairs(indexed);
 
+    if (!pairs.length && season !== null && episode !== null && season > 1 && indexed.length) {
+      // Torrent's already indexed for this show, just not under this
+      // season/episode combo — some releases number episodes absolutely
+      // across the whole series instead of restarting each season.
+      try {
+        const targetMeta = await findByImdbId(id, torrentType, apiKey);
+        if (targetMeta && targetMeta.id) {
+          const counts = await getSeasonEpisodeCounts(targetMeta.id, apiKey);
+          let absolute = episode;
+          for (let s = 1; s < season; s++) absolute += counts[s] || 0;
+          if (absolute !== episode) pairs = buildPairs(indexed, absolute);
+        }
+      } catch (e) {
+        console.error(`Absolute-episode fallback failed for ${id}:`, e.message);
+      }
+    }
+
     if (!pairs.length) {
       // Index doesn't have this episode yet (cold, or indexed but this
       // specific file wasn't). Try one live check: real title for this
@@ -878,37 +958,54 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
             getTorboxLibrary(apiKey)
           ]);
           if (!targetMeta) return [];
-          const targetWords = wordsOf(targetMeta.title || targetMeta.name || '');
-          if (!targetWords.length) return [];
+          const wordSets = titleWordVariants(targetMeta.title || targetMeta.name || '');
+          if (!wordSets.length) return [];
           const targetDate = targetMeta.release_date || targetMeta.first_air_date || '';
           const targetYear = targetDate ? parseInt(targetDate.slice(0, 4)) : null;
-          const matchesTarget = (name) => {
+          const matchesTarget = (name, sets) => {
             const words = wordsOf(cleanTitle(name));
             if (!words.length) return false;
-            // Containment first: the full target title appearing intact
-            // anywhere in the candidate is a strong signal on its own,
-            // regardless of what trails after it (an episode title,
-            // quality tags, group names) — those shouldn't be able to
-            // hurt a match this clean the way a raw ratio would.
+            // Containment first, tried against every title variant: the
+            // full title appearing intact anywhere in the candidate is a
+            // strong signal on its own, regardless of what trails after
+            // it (an episode title, quality tags, group names) — those
+            // shouldn't be able to hurt a match this clean the way a raw
+            // ratio would.
             let contained = false;
-            for (let i = 0; i <= words.length - targetWords.length; i++) {
-              if (targetWords.every((w, j) => words[i + j] === w)) { contained = true; break; }
+            for (const targetWords of sets) {
+              for (let i = 0; i <= words.length - targetWords.length; i++) {
+                if (targetWords.every((w, j) => words[i + j] === w)) { contained = true; break; }
+              }
+              if (contained) break;
             }
             if (!contained) {
-              // Fall back to fuzzy overlap for shortened/simplified names
-              // that don't contain the target's exact wording.
-              const overlap = targetWords.filter(w => words.includes(w)).length;
-              if (overlap / Math.max(targetWords.length, words.length) < 0.6) return false;
+              // Fall back to fuzzy overlap (against the fullest variant)
+              // for shortened/simplified names that don't contain any
+              // variant's exact wording.
+              const primary = sets[0];
+              const overlap = primary.filter(w => words.includes(w)).length;
+              if (overlap / Math.max(primary.length, words.length) < 0.6) return false;
             }
             const nameYear = extractYear(name);
             return !(targetYear && nameYear && Math.abs(targetYear - nameYear) > 1);
           };
-          const candidates = library.filter(torrent => {
+          const findCandidates = (sets) => library.filter(torrent => {
             if (detectType(torrent) !== torrentType) return false;
-            if (matchesTarget(torrent.name)) return true;
+            if (matchesTarget(torrent.name, sets)) return true;
             // Torrent name might be random/unmatchable — check file names too.
-            return (torrent.files || []).some(f => matchesTarget(f.short_name || f.name));
+            return (torrent.files || []).some(f => matchesTarget(f.short_name || f.name, sets));
           });
+
+          let candidates = findCandidates(wordSets);
+          if (!candidates.length && targetMeta.id) {
+            // Primary title (plus its variants) found nothing — try TMDB's
+            // alternative titles, for releases using a different regional
+            // name or the original-language title.
+            const altTitles = await getTmdbAlternativeTitles(targetMeta.id, torrentType, apiKey);
+            const altSets = altTitles.flatMap(t => titleWordVariants(t));
+            if (altSets.length) candidates = findCandidates(altSets);
+          }
+
           return buildPairs(candidates);
         })(), 7000);
       } catch (e) {
