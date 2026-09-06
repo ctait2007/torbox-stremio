@@ -892,14 +892,24 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
         for (const torrent of torrents) {
           const videoFiles = (torrent.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name));
           let filtered = videoFiles.filter(f => pattern.test(f.name));
-          if (!filtered.length) filtered = videoFiles.filter(f => barePattern.test(f.name));
           if (!filtered.length) {
-            filtered = videoFiles.filter(f => {
-              const m = f.name.match(rangePattern);
-              if (!m) return false;
-              const a = parseInt(m[1]), b = parseInt(m[2]);
-              return episodeToMatch >= Math.min(a, b) && episodeToMatch <= Math.max(a, b);
-            });
+            // Bare/range patterns below don't encode season at all — only
+            // safe to try if this torrent's own name doesn't clearly say
+            // it's a different season. A torrent with no season stated at
+            // all (e.g. a single-season show) still gets the benefit.
+            const seasonMatch = torrent.name.match(/\bS(\d{1,2})\b/i) || torrent.name.match(/\bSeason\s*(\d{1,2})\b/i);
+            const torrentSeason = seasonMatch ? parseInt(seasonMatch[1]) : null;
+            if (torrentSeason === null || torrentSeason === season) {
+              filtered = videoFiles.filter(f => barePattern.test(f.name));
+              if (!filtered.length) {
+                filtered = videoFiles.filter(f => {
+                  const m = f.name.match(rangePattern);
+                  if (!m) return false;
+                  const a = parseInt(m[1]), b = parseInt(m[2]);
+                  return episodeToMatch >= Math.min(a, b) && episodeToMatch <= Math.max(a, b);
+                });
+              }
+            }
           }
           // Exclude sample/preview clips, but only when it's safe to —
           // i.e. some other match for this episode still remains. Never
@@ -961,10 +971,16 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       // this covers TorBox/TMDB being merely slow instead.
       try {
         const result = await withTimeout((async () => {
-          const [targetMeta, library] = await Promise.all([
+          const [targetMeta, rawLibrary] = await Promise.all([
             findByImdbId(id, torrentType, apiKey),
             getTorboxLibrary(apiKey)
           ]);
+          // Only torrents not already matched to some show belong here —
+          // anything already in torrentIndex was already checked against
+          // this exact request in step 1-2, and has no reason to be
+          // reconsidered against a different show's search.
+          const alreadyIndexedIds = new Set(index.map(e => e.torrent.id));
+          const library = rawLibrary.filter(t => !alreadyIndexedIds.has(t.id));
           if (!targetMeta) return { pairs: [], candidates: [], targetMeta: null };
           const wordSets = titleWordVariants(targetMeta.title || targetMeta.name || '');
           if (!wordSets.length) return { pairs: [], candidates: [], targetMeta };
