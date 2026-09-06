@@ -981,6 +981,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
           // reconsidered against a different show's search.
           const alreadyIndexedIds = new Set(index.map(e => e.torrent.id));
           const library = rawLibrary.filter(t => !alreadyIndexedIds.has(t.id));
+          console.error(`Live fallback for ${id}: targetMeta=${targetMeta ? `"${targetMeta.title || targetMeta.name}"` : 'NONE'}, ${rawLibrary.length} total torrents, ${library.length} unmatched`);
           if (!targetMeta) return { pairs: [], candidates: [], targetMeta: null };
           const wordSets = titleWordVariants(targetMeta.title || targetMeta.name || '');
           if (!wordSets.length) return { pairs: [], candidates: [], targetMeta };
@@ -1021,6 +1022,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
           });
 
           let candidates = findCandidates(wordSets);
+          console.error(`Live fallback for ${id}: primary title variants [${wordSets.map(s => s.join(' ')).join(' | ')}] found ${candidates.length} candidates`);
           if (!candidates.length && targetMeta.id) {
             // Primary title (plus its variants) found nothing — try TMDB's
             // alternative titles, for releases using a different regional
@@ -1028,6 +1030,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
             const altTitles = await getTmdbAlternativeTitles(targetMeta.id, torrentType, apiKey);
             const altSets = altTitles.flatMap(t => titleWordVariants(t));
             if (altSets.length) candidates = findCandidates(altSets);
+            console.error(`Live fallback for ${id}: ${altTitles.length} alternative titles tried, found ${candidates.length} candidates`);
           }
 
           return { pairs: buildPairs(candidates), candidates, targetMeta };
