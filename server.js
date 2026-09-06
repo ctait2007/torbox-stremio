@@ -901,6 +901,14 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
               return episodeToMatch >= Math.min(a, b) && episodeToMatch <= Math.max(a, b);
             });
           }
+          // Exclude sample/preview clips, but only when it's safe to —
+          // i.e. some other match for this episode still remains. Never
+          // excludes the last candidate, so a real episode whose own
+          // title happens to contain "sample" is never thrown out.
+          const flaggedAsSample = filtered.filter(f => /sample/i.test(f.short_name || f.name));
+          if (flaggedAsSample.length && flaggedAsSample.length < filtered.length) {
+            filtered = filtered.filter(f => !flaggedAsSample.includes(f));
+          }
           filtered.forEach(f => found.push({ file: f, torrent }));
         }
         if (!found.length && torrents.length) {
@@ -952,14 +960,14 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       // outright failures are caught by the handler's own try/catch;
       // this covers TorBox/TMDB being merely slow instead.
       try {
-        pairs = await withTimeout((async () => {
+        const result = await withTimeout((async () => {
           const [targetMeta, library] = await Promise.all([
             findByImdbId(id, torrentType, apiKey),
             getTorboxLibrary(apiKey)
           ]);
-          if (!targetMeta) return [];
+          if (!targetMeta) return { pairs: [], candidates: [], targetMeta: null };
           const wordSets = titleWordVariants(targetMeta.title || targetMeta.name || '');
-          if (!wordSets.length) return [];
+          if (!wordSets.length) return { pairs: [], candidates: [], targetMeta };
           const targetDate = targetMeta.release_date || targetMeta.first_air_date || '';
           const targetYear = targetDate ? parseInt(targetDate.slice(0, 4)) : null;
           const matchesTarget = (name, sets) => {
@@ -1006,8 +1014,30 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
             if (altSets.length) candidates = findCandidates(altSets);
           }
 
-          return buildPairs(candidates);
+          return { pairs: buildPairs(candidates), candidates, targetMeta };
         })(), 7000);
+        pairs = result.pairs;
+
+        // Remember a successful live match so future requests for this
+        // show don't need to repeat the search — deliberately outside the
+        // search's own 7s budget, and in its own try/catch: a save
+        // failure here must never cost the stream just found.
+        if (result.candidates.length) {
+          try {
+            const cache = getCache(apiKey);
+            if (cache.torrentIndex) {
+              const finalType = torrentType === 'series' ? await resolveSeriesType(result.targetMeta.id, apiKey) : torrentType;
+              for (const torrent of result.candidates) {
+                const i = cache.torrentIndex.findIndex(e => e.torrent.id === torrent.id);
+                const entry = { torrent, imdbId: id, torrentType, finalType, tmdb: result.targetMeta };
+                if (i === -1) cache.torrentIndex.push(entry);
+                else cache.torrentIndex[i] = entry;
+              }
+            }
+          } catch (e) {
+            console.error(`Retroactive index update failed for ${id}:`, e.message);
+          }
+        }
       } catch (e) {
         console.error(`Targeted fallback gave up for ${id}:`, e.message);
         pairs = [];
