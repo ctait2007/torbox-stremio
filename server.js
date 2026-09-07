@@ -1098,7 +1098,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
 // Self-serve diagnostics — shows every torrent's detected type, cleaned
 // title, TMDB match, or the exact reason it failed to match. Movies/series/
 // errors are one filterable, color-coded list instead of separate pages.
-function renderDebugHtml(results, apiKey) {
+function renderDebugHtml(results) {
   const ok = results.filter(r => !r.issue).length;
   const counts = {
     movie: results.filter(r => !r.issue && r.detectedType === 'movie').length,
@@ -1117,7 +1117,7 @@ function renderDebugHtml(results, apiKey) {
         ${r.tmdbMatch ? `<span><b>TMDB:</b> ${r.tmdbMatch} (${r.tmdbId})</span>` : ''}
         ${r.imdbId ? `<span><b>IMDB:</b> ${r.imdbId}</span>` : ''}
       </div>
-      ${r.issue ? `<div class="issue">⚠️ ${r.issue}</div><button class="retry-btn" data-torrent="${encodeURIComponent(r.torrent)}">Retry match</button>` : ''}
+      ${r.issue ? `<div class="issue">⚠️ ${r.issue}</div>` : ''}
     </div>`;
   }).join('');
 
@@ -1145,8 +1145,6 @@ function renderDebugHtml(results, apiKey) {
     .fields { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: #999; }
     .fields b { color: #ccc; font-weight: 600; }
     .issue { color: #f59e0b; font-size: 12px; margin-top: 8px; }
-    .retry-btn { margin-top: 8px; background: #2a1414; border: 1px solid #dc2626; color: #fca5a5; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
-    .retry-btn:disabled { opacity: 0.5; cursor: default; }
   </style>
 </head>
 <body>
@@ -1163,7 +1161,6 @@ function renderDebugHtml(results, apiKey) {
   <script>
     let activeFilter = 'all';
     const searchEl = document.getElementById('search');
-    const retryUrl = '/${apiKey}/debug/retry';
 
     function applyFilters() {
       const q = searchEl.value.toLowerCase();
@@ -1182,70 +1179,6 @@ function renderDebugHtml(results, apiKey) {
         applyFilters();
       });
     });
-
-    function escapeHtml(s) {
-      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    function rowInnerHtml(r) {
-      var html = '<div class="torrent">' + escapeHtml(r.torrent) + '</div>';
-      html += '<div class="fields"><span><b>Type:</b> ' + escapeHtml(r.detectedType) + '</span>';
-      if (r.cleanedTitle) html += '<span><b>Title:</b> ' + escapeHtml(r.cleanedTitle) + '</span>';
-      if (r.extractedYear) html += '<span><b>Year:</b> ' + escapeHtml(String(r.extractedYear)) + '</span>';
-      if (r.tmdbMatch) html += '<span><b>TMDB:</b> ' + escapeHtml(r.tmdbMatch) + ' (' + escapeHtml(String(r.tmdbId)) + ')</span>';
-      if (r.imdbId) html += '<span><b>IMDB:</b> ' + escapeHtml(r.imdbId) + '</span>';
-      html += '</div>';
-      if (r.issue) {
-        html += '<div class="issue">⚠️ ' + escapeHtml(r.issue) + '</div>';
-        html += '<button class="retry-btn" data-torrent="' + encodeURIComponent(r.torrent) + '">Retry match</button>';
-      }
-      return html;
-    }
-
-    function attachRetryHandlers(scope) {
-      scope.querySelectorAll('.retry-btn').forEach(btn => {
-        btn.addEventListener('click', () => runRetry(btn));
-      });
-    }
-
-    function updateCounts() {
-      const allRows = document.querySelectorAll('#rows .row');
-      const c = { movie: 0, series: 0, error: 0 };
-      allRows.forEach(row => { if (c[row.dataset.cat] !== undefined) c[row.dataset.cat]++; });
-      document.querySelector('[data-filter="all"]').textContent = 'All (' + allRows.length + ')';
-      document.querySelector('[data-filter="movie"]').textContent = 'Movies (' + c.movie + ')';
-      document.querySelector('[data-filter="series"]').textContent = 'Series (' + c.series + ')';
-      document.querySelector('[data-filter="error"]').textContent = 'Errors (' + c.error + ')';
-    }
-
-    function runRetry(btn) {
-      const row = btn.closest('.row');
-      const torrentName = decodeURIComponent(btn.dataset.torrent);
-      btn.disabled = true;
-      btn.textContent = 'Checking...';
-      fetch(retryUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ torrent: torrentName })
-      })
-        .then(r => r.json())
-        .then(r => {
-          const cat = r.issue ? 'error' : r.detectedType;
-          row.className = 'row ' + cat;
-          row.dataset.cat = cat;
-          row.dataset.search = ((r.torrent || '') + ' ' + (r.cleanedTitle || '')).toLowerCase().replace(/"/g, '');
-          row.innerHTML = rowInnerHtml(r);
-          attachRetryHandlers(row);
-          updateCounts();
-          applyFilters();
-        })
-        .catch(() => {
-          btn.textContent = 'Retry failed — tap to try again';
-          btn.disabled = false;
-        });
-    }
-
-    attachRetryHandlers(document);
   </script>
 </body>
 </html>`;
@@ -1255,9 +1188,28 @@ app.get('/:apiKey/debug', async (req, res) => {
   try {
     const { apiKey } = req.params;
     const torrents = await getTorboxLibrary(apiKey);
+    const index = await getTorrentIndex(apiKey);
+    const indexById = new Map(index.map(e => [e.torrent.id, e]));
 
     const results = await Promise.all(
       torrents.map(async (torrent) => {
+        const existing = indexById.get(torrent.id);
+        if (existing) {
+          const date = existing.tmdb.release_date || existing.tmdb.first_air_date || '';
+          return {
+            torrent: torrent.name,
+            detectedType: existing.torrentType,
+            cleanedTitle: existing.tmdb.title || existing.tmdb.name,
+            extractedYear: date ? parseInt(date.slice(0, 4)) : null,
+            tmdbMatch: existing.tmdb.title || existing.tmdb.name,
+            tmdbId: existing.tmdb.id,
+            imdbId: existing.imdbId,
+            issue: null
+          };
+        }
+
+        // Not yet indexed — run the same search a rebuild would, purely to
+        // explain why (or to confirm it now succeeds, ahead of the next one).
         const detected = detectType(torrent);
         let title = cleanTitle(torrent.name);
         let year = extractYear(torrent.name);
@@ -1300,64 +1252,7 @@ app.get('/:apiKey/debug', async (req, res) => {
     }
     res.setHeader('Content-Type', 'text/html');
     res.setHeader('Cache-Control', 'no-store');
-    res.send(renderDebugHtml(results, apiKey));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Re-checks a single torrent on demand (bypassing the 24h TMDB/IMDB cache),
-// so a debug-page "error" row can be cleared without a full /refresh.
-// Patches the live torrentIndex on success so catalog/stream see it too.
-app.post('/:apiKey/debug/retry', async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  try {
-    const { apiKey } = req.params;
-    const torrentName = req.body?.torrent;
-    if (!torrentName) return res.status(400).json({ error: 'torrent name required' });
-
-    const torrents = await getTorboxLibrary(apiKey);
-    const torrent = torrents.find(t => t.name === torrentName);
-    if (!torrent) return res.status(404).json({ error: 'torrent no longer in library' });
-
-    const detected = detectType(torrent);
-    let title = cleanTitle(torrent.name);
-    let year = extractYear(torrent.name);
-    let tmdb = await searchTmdb(title, year, detected, apiKey, 3, true);
-    let viaFile = false;
-
-    if (!tmdb) {
-      const videoFiles = (torrent.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name));
-      for (const file of videoFiles.slice(0, 3)) {
-        const fileName = file.short_name || file.name;
-        const fTitle = cleanTitle(fileName);
-        const fYear = extractYear(fileName);
-        tmdb = await searchTmdb(fTitle, fYear, detected, apiKey, 3, true);
-        if (tmdb) { title = fTitle; year = fYear; viaFile = true; break; }
-      }
-    }
-
-    if (!tmdb) {
-      return res.json({ torrent: torrent.name, detectedType: detected, cleanedTitle: title, extractedYear: year, issue: 'No TMDB match found (checked torrent name and file names)' });
-    }
-
-    const imdbId = await getImdbId(tmdb.id, detected, apiKey, 3, true);
-    const cleanedTitle = title + (viaFile ? ' (via file name)' : '');
-    if (!imdbId) {
-      return res.json({ torrent: torrent.name, detectedType: detected, cleanedTitle, extractedYear: year, tmdbMatch: tmdb.title || tmdb.name, tmdbId: tmdb.id, issue: 'TMDB matched but no IMDB ID available' });
-    }
-
-    const finalType = detected === 'series' ? await resolveSeriesType(tmdb.id, apiKey) : detected;
-    const cache = getCache(apiKey);
-    if (cache.torrentIndex) {
-      const i = cache.torrentIndex.findIndex(e => e.torrent.name === torrentName);
-      const entry = { torrent, imdbId, torrentType: detected, finalType, tmdb };
-      if (i === -1) cache.torrentIndex.push(entry);
-      else cache.torrentIndex[i] = entry;
-    }
-
-    res.json({ torrent: torrent.name, detectedType: detected, cleanedTitle, extractedYear: year, tmdbMatch: tmdb.title || tmdb.name, tmdbId: tmdb.id, imdbId, issue: null });
+    res.send(renderDebugHtml(results));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
