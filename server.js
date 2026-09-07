@@ -900,7 +900,12 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
             // safe to try if this torrent's own name doesn't clearly say
             // it's a different season. A torrent with no season stated at
             // all (e.g. a single-season show) still gets the benefit.
-            const seasonMatch = torrent.name.match(/\bS(\d{1,2})\b/i) || torrent.name.match(/\bSeason\s*(\d{1,2})\b/i);
+            // "S04E06" style must be checked before bare "S04" — a plain
+            // \bS(\d{1,2})\b never matches here, since E immediately
+            // follows the digits with no word boundary between them.
+            const seasonMatch = torrent.name.match(/\bS(\d{1,2})[\s\-]*E\d{1,2}\b/i)
+              || torrent.name.match(/\bS(\d{1,2})\b/i)
+              || torrent.name.match(/\bSeason\s*(\d{1,2})\b/i);
             const torrentSeason = seasonMatch ? parseInt(seasonMatch[1]) : null;
             if (torrentSeason === null || torrentSeason === season) {
               filtered = videoFiles.filter(f => barePattern.test(f.name));
