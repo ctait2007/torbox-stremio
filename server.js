@@ -426,16 +426,23 @@ function pickBestMatch(results, title, year) {
   const stripArticle = s => (s || '').replace(/^(the|a|an)\s+/i, '');
   const strippedSearch = normalizeTitle(stripArticle(title));
 
-  let match = results.find(r => normalizeTitle(r.title || r.name || '') === normalizedSearch);
+  // A result's original-language title is a separate TMDB field from its
+  // display title, and a search query might only match one of the two —
+  // "La Captura" only ever appears here, not in "Facing El Chapo".
+  const titlesOf = (r) => [...new Set([r.title || r.name, r.original_title || r.original_name].filter(Boolean))];
+
+  let match = results.find(r => titlesOf(r).some(t => normalizeTitle(t) === normalizedSearch));
   if (match) return match;
 
-  match = results.find(r => normalizeTitle(stripArticle(r.title || r.name || '')) === strippedSearch);
+  match = results.find(r => titlesOf(r).some(t => normalizeTitle(stripArticle(t)) === strippedSearch));
   if (match) return match;
 
-  match = results.find(r => {
-    const base = (r.title || r.name || '').split(/[:\-–]/)[0];
+  match = results.find(r => titlesOf(r).some(t => {
+    // Colon always separates a subtitle; a dash only when spaced on both
+    // sides — a fused hyphen ("Spider-Man") is part of the title itself.
+    const base = t.split(/:|\s[-–]\s/)[0];
     return normalizeTitle(base) === normalizedSearch;
-  });
+  }));
   if (match) return match;
 
   const searchWords = wordsOf(title);
@@ -443,10 +450,15 @@ function pickBestMatch(results, title, year) {
     let best = null;
     let bestScore = 0;
     for (const r of results) {
-      const candidateWords = wordsOf(r.title || r.name || '');
-      if (!candidateWords.length) continue;
-      const overlap = searchWords.filter(w => candidateWords.includes(w)).length;
-      const score = overlap / Math.max(searchWords.length, candidateWords.length);
+      // Best word-overlap score across this result's title variants.
+      let candidateScore = 0;
+      for (const t of titlesOf(r)) {
+        const candidateWords = wordsOf(t);
+        if (!candidateWords.length) continue;
+        const overlap = searchWords.filter(w => candidateWords.includes(w)).length;
+        const score = overlap / Math.max(searchWords.length, candidateWords.length);
+        if (score > candidateScore) candidateScore = score;
+      }
       let yearAdjustment = 0;
       if (year) {
         const rYear = parseInt((r.release_date || r.first_air_date || '').slice(0, 4));
@@ -456,7 +468,7 @@ function pickBestMatch(results, title, year) {
           else if (diff > 3) yearAdjustment = -0.3; // penalize, don't just fail to reward
         }
       }
-      const total = score + yearAdjustment;
+      const total = candidateScore + yearAdjustment;
       if (total > bestScore) { bestScore = total; best = r; }
     }
     if (best && bestScore >= 0.6) return best;
