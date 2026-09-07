@@ -999,7 +999,15 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
         const targetMeta = await findByImdbId(id, torrentType, apiKey);
         console.error(`Live fallback for ${id}: targetMeta=${targetMeta ? `"${targetMeta.title || targetMeta.name}"` : 'NONE'}, ${library.length} unmatched of ${rawLibrary.length} total torrents`);
         if (!targetMeta) return { pairs: [], candidates: [], targetMeta: null };
-        const wordSets = titleWordVariants(targetMeta.title || targetMeta.name || '');
+        // original_title/original_name (the production's original-language
+        // title) is a separate TMDB field from alternative_titles, and
+        // already came back with targetMeta at no extra cost — worth
+        // trying before spending an API call on alternative titles.
+        const primaryTitles = [...new Set([
+          targetMeta.title || targetMeta.name,
+          targetMeta.original_title || targetMeta.original_name
+        ].filter(Boolean))];
+        const wordSets = primaryTitles.flatMap(t => titleWordVariants(t));
         if (!wordSets.length) return { pairs: [], candidates: [], targetMeta };
         const targetDate = targetMeta.release_date || targetMeta.first_air_date || '';
         const targetYear = targetDate ? parseInt(targetDate.slice(0, 4)) : null;
