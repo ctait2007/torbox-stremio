@@ -963,104 +963,103 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       }
     }
 
-    if (!pairs.length) {
-      // Index doesn't have this episode yet (cold, or indexed but this
-      // specific file wasn't). Try one live check: real title for this
-      // imdbId, matched against the current library. Capped at 7s —
-      // outright failures are caught by the handler's own try/catch;
-      // this covers TorBox/TMDB being merely slow instead.
-      try {
-        const result = await withTimeout((async () => {
-          const [targetMeta, rawLibrary] = await Promise.all([
-            findByImdbId(id, torrentType, apiKey),
-            getTorboxLibrary(apiKey)
-          ]);
-          // Only torrents not already matched to some show belong here —
-          // anything already in torrentIndex was already checked against
-          // this exact request in step 1-2, and has no reason to be
-          // reconsidered against a different show's search.
-          const alreadyIndexedIds = new Set(index.map(e => e.torrent.id));
-          const library = rawLibrary.filter(t => !alreadyIndexedIds.has(t.id));
-          console.error(`Live fallback for ${id}: targetMeta=${targetMeta ? `"${targetMeta.title || targetMeta.name}"` : 'NONE'}, ${rawLibrary.length} total torrents, ${library.length} unmatched`);
-          if (!targetMeta) return { pairs: [], candidates: [], targetMeta: null };
-          const wordSets = titleWordVariants(targetMeta.title || targetMeta.name || '');
-          if (!wordSets.length) return { pairs: [], candidates: [], targetMeta };
-          const targetDate = targetMeta.release_date || targetMeta.first_air_date || '';
-          const targetYear = targetDate ? parseInt(targetDate.slice(0, 4)) : null;
-          const matchesTarget = (name, sets) => {
-            const words = wordsOf(cleanTitle(name));
-            if (!words.length) return false;
-            // Containment first, tried against every title variant: the
-            // full title appearing intact anywhere in the candidate is a
-            // strong signal on its own, regardless of what trails after
-            // it (an episode title, quality tags, group names) — those
-            // shouldn't be able to hurt a match this clean the way a raw
-            // ratio would.
-            let contained = false;
-            for (const targetWords of sets) {
-              for (let i = 0; i <= words.length - targetWords.length; i++) {
-                if (targetWords.every((w, j) => words[i + j] === w)) { contained = true; break; }
-              }
-              if (contained) break;
-            }
-            if (!contained) {
-              // Fall back to fuzzy overlap (against the fullest variant)
-              // for shortened/simplified names that don't contain any
-              // variant's exact wording.
-              const primary = sets[0];
-              const overlap = primary.filter(w => words.includes(w)).length;
-              if (overlap / Math.max(primary.length, words.length) < 0.6) return false;
-            }
-            const nameYear = extractYear(name);
-            return !(targetYear && nameYear && Math.abs(targetYear - nameYear) > 1);
-          };
-          const findCandidates = (sets) => library.filter(torrent => {
-            if (detectType(torrent) !== torrentType) return false;
-            if (matchesTarget(torrent.name, sets)) return true;
-            // Torrent name might be random/unmatchable — check file names too.
-            return (torrent.files || []).some(f => matchesTarget(f.short_name || f.name, sets));
-          });
+    // Always also check torrents that haven't matched any show yet — a
+    // movie/show can have some releases already indexed and others still
+    // sitting unmatched (a naming issue, etc.), and both should surface
+    // as playable options, not just whichever was found first. Once an
+    // unmatched torrent gets picked up here it's written into
+    // torrentIndex below, so this only does real work for it once.
+    try {
+      const result = await withTimeout((async () => {
+        const rawLibrary = await getTorboxLibrary(apiKey);
+        // Only torrents not already matched to some show belong here —
+        // anything already in torrentIndex was already checked in step
+        // 1-2 above, and has no reason to be reconsidered here.
+        const alreadyIndexedIds = new Set(index.map(e => e.torrent.id));
+        const library = rawLibrary.filter(t => !alreadyIndexedIds.has(t.id));
+        if (!library.length) return { pairs: [], candidates: [], targetMeta: null };
 
-          let candidates = findCandidates(wordSets);
-          console.error(`Live fallback for ${id}: primary title variants [${wordSets.map(s => s.join(' ')).join(' | ')}] found ${candidates.length} candidates`);
-          if (!candidates.length && targetMeta.id) {
-            // Primary title (plus its variants) found nothing — try TMDB's
-            // alternative titles, for releases using a different regional
-            // name or the original-language title.
-            const altTitles = await getTmdbAlternativeTitles(targetMeta.id, torrentType, apiKey);
-            const altSets = altTitles.flatMap(t => titleWordVariants(t));
-            if (altSets.length) candidates = findCandidates(altSets);
-            console.error(`Live fallback for ${id}: ${altTitles.length} alternative titles tried, found ${candidates.length} candidates`);
+        const targetMeta = await findByImdbId(id, torrentType, apiKey);
+        console.error(`Live fallback for ${id}: targetMeta=${targetMeta ? `"${targetMeta.title || targetMeta.name}"` : 'NONE'}, ${library.length} unmatched of ${rawLibrary.length} total torrents`);
+        if (!targetMeta) return { pairs: [], candidates: [], targetMeta: null };
+        const wordSets = titleWordVariants(targetMeta.title || targetMeta.name || '');
+        if (!wordSets.length) return { pairs: [], candidates: [], targetMeta };
+        const targetDate = targetMeta.release_date || targetMeta.first_air_date || '';
+        const targetYear = targetDate ? parseInt(targetDate.slice(0, 4)) : null;
+        const matchesTarget = (name, sets) => {
+          const words = wordsOf(cleanTitle(name));
+          if (!words.length) return false;
+          // Containment first, tried against every title variant: the
+          // full title appearing intact anywhere in the candidate is a
+          // strong signal on its own, regardless of what trails after
+          // it (an episode title, quality tags, group names) — those
+          // shouldn't be able to hurt a match this clean the way a raw
+          // ratio would.
+          let contained = false;
+          for (const targetWords of sets) {
+            for (let i = 0; i <= words.length - targetWords.length; i++) {
+              if (targetWords.every((w, j) => words[i + j] === w)) { contained = true; break; }
+            }
+            if (contained) break;
           }
-
-          return { pairs: buildPairs(candidates), candidates, targetMeta };
-        })(), 7000);
-        pairs = result.pairs;
-
-        // Remember a successful live match so future requests for this
-        // show don't need to repeat the search — deliberately outside the
-        // search's own 7s budget, and in its own try/catch: a save
-        // failure here must never cost the stream just found.
-        if (result.candidates.length) {
-          try {
-            const cache = getCache(apiKey);
-            if (cache.torrentIndex) {
-              const finalType = torrentType === 'series' ? await resolveSeriesType(result.targetMeta.id, apiKey) : torrentType;
-              for (const torrent of result.candidates) {
-                const i = cache.torrentIndex.findIndex(e => e.torrent.id === torrent.id);
-                const entry = { torrent, imdbId: id, torrentType, finalType, tmdb: result.targetMeta };
-                if (i === -1) cache.torrentIndex.push(entry);
-                else cache.torrentIndex[i] = entry;
-              }
-            }
-          } catch (e) {
-            console.error(`Retroactive index update failed for ${id}:`, e.message);
+          if (!contained) {
+            // Fall back to fuzzy overlap (against the fullest variant)
+            // for shortened/simplified names that don't contain any
+            // variant's exact wording.
+            const primary = sets[0];
+            const overlap = primary.filter(w => words.includes(w)).length;
+            if (overlap / Math.max(primary.length, words.length) < 0.6) return false;
           }
+          const nameYear = extractYear(name);
+          return !(targetYear && nameYear && Math.abs(targetYear - nameYear) > 1);
+        };
+        const findCandidates = (sets) => library.filter(torrent => {
+          if (detectType(torrent) !== torrentType) return false;
+          if (matchesTarget(torrent.name, sets)) return true;
+          // Torrent name might be random/unmatchable — check file names too.
+          return (torrent.files || []).some(f => matchesTarget(f.short_name || f.name, sets));
+        });
+
+        let candidates = findCandidates(wordSets);
+        console.error(`Live fallback for ${id}: primary title variants [${wordSets.map(s => s.join(' ')).join(' | ')}] found ${candidates.length} candidates`);
+        if (!candidates.length && targetMeta.id) {
+          // Primary title (plus its variants) found nothing — try TMDB's
+          // alternative titles, for releases using a different regional
+          // name or the original-language title.
+          const altTitles = await getTmdbAlternativeTitles(targetMeta.id, torrentType, apiKey);
+          const altSets = altTitles.flatMap(t => titleWordVariants(t));
+          if (altSets.length) candidates = findCandidates(altSets);
+          console.error(`Live fallback for ${id}: ${altTitles.length} alternative titles tried, found ${candidates.length} candidates`);
         }
-      } catch (e) {
-        console.error(`Targeted fallback gave up for ${id}:`, e.message);
-        pairs = [];
+
+        return { pairs: buildPairs(candidates), candidates, targetMeta };
+      })(), 7000);
+      pairs = [...pairs, ...result.pairs];
+
+      // Remember a successful live match so future requests for this
+      // show don't need to repeat the search — deliberately outside the
+      // search's own 7s budget, and in its own try/catch: a save
+      // failure here must never cost the streams already found.
+      if (result.candidates.length) {
+        try {
+          const cache = getCache(apiKey);
+          if (cache.torrentIndex) {
+            const finalType = torrentType === 'series' ? await resolveSeriesType(result.targetMeta.id, apiKey) : torrentType;
+            for (const torrent of result.candidates) {
+              const i = cache.torrentIndex.findIndex(e => e.torrent.id === torrent.id);
+              const entry = { torrent, imdbId: id, torrentType, finalType, tmdb: result.targetMeta };
+              if (i === -1) cache.torrentIndex.push(entry);
+              else cache.torrentIndex[i] = entry;
+            }
+          }
+        } catch (e) {
+          console.error(`Retroactive index update failed for ${id}:`, e.message);
+        }
       }
+    } catch (e) {
+      // A failure here must never cost a match the primary index already
+      // found — leave pairs exactly as it was, don't reset it.
+      console.error(`Unmatched-torrent fallback gave up for ${id}:`, e.message);
     }
 
     if (!pairs.length) return res.json({ streams: [] });
