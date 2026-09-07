@@ -371,19 +371,28 @@ const JUNK_PATTERNS = [
   { pattern: /\bCOMPLETO\b/i, minIndex: 0 },
   { pattern: /\bLF[_\s]/i, minIndex: 0 },
   { pattern: /\b(19|20)\d{2}\b/, minIndex: 1 },
-  { pattern: /\b(MULTi|MULTI|VFF|VF|VO|VOST|TRUEFRENCH|ITA|ENG|SPA|POR|RUS|RU|RUSENG|JPN|GER|FRE|FRA|DUT|NLD|SWE|NOR|DAN|FIN|POL|CZE|HUN|ROM|TUR|KOR|ARA|HEB|HIN|THA|VIE|IND|DUBBED|SUBBED|DUAL|MULTI5|MULTI6|MULTISUB)\b/i, minIndex: 1 },
+  // Long, distinctive language/release markers — essentially never a
+  // coincidental substring of a real title.
+  { pattern: /\b(MULTi|MULTI|TRUEFRENCH|VOST|RUSENG|DUBBED|SUBBED|DUAL|MULTI5|MULTI6|MULTISUB)\b/i, minIndex: 1 },
+  // Short 2-3 letter ISO-style codes — real, but risky: short enough to
+  // coincidentally match part of an actual title ("CHI" inside
+  // "Shang-Chi"). Marked risky so cleanTitle can optionally not let these
+  // determine the cutoff point, without dropping them from junk-stripping
+  // entirely.
+  { pattern: /\b(VFF|VF|VO|ITA|ENG|SPA|POR|RUS|RU|JPN|GER|FRE|FRA|DUT|NLD|SWE|NOR|DAN|FIN|POL|CZE|HUN|ROM|TUR|KOR|CHI|ARA|HEB|HIN|THA|VIE|IND)\b/i, minIndex: 1, risky: true },
   { pattern: /\b(1080p|720p|2160p|4k|bluray|bdrip|webrip|web-dl|web|hdtv|x264|x265|hevc|aac|dd5|h264|h265|remux|hdlight|10bit|8bit|ac3|dts|atmos)\b/i, minIndex: 0 },
   { pattern: /\b(proper|repack|extended|theatrical|directors\.?cut)\b/i, minIndex: 0 },
 ];
 
-function cleanTitle(name) {
+function cleanTitle(name, options = {}) {
   let working = name
     .replace(/\.(mkv|mp4|avi|mov|wmv)$/i, '')
     .replace(/\[.*?\]/g, '')
     .replace(/[\._]/g, ' ');
 
   let cutIndex = working.length;
-  for (const { pattern, minIndex } of JUNK_PATTERNS) {
+  for (const { pattern, minIndex, risky } of JUNK_PATTERNS) {
+    if (risky && options.ignoreRisky) continue;
     const idx = firstMatchIndex(working, pattern, minIndex);
     if (idx !== -1 && idx < cutIndex) cutIndex = idx;
   }
@@ -752,22 +761,39 @@ async function rebuildTorrentIndex(apiKey) {
     processed++;
     try {
       const torrentType = detectType(torrent);
-      let title = cleanTitle(torrent.name);
-      let year = extractYear(torrent.name);
-      let tmdb = await searchTmdb(title, year, torrentType, apiKey);
+      const videoFiles = (torrent.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name));
 
-      // Some torrents have random/unmatchable names but properly-named
-      // files inside — retry against a few file names before giving up.
+      // Tries the torrent's own name, then up to 3 file names, with the
+      // given cutoff strictness.
+      const attempt = async (ignoreRisky) => {
+        let t = cleanTitle(torrent.name, { ignoreRisky });
+        let y = extractYear(torrent.name);
+        let m = await searchTmdb(t, y, torrentType, apiKey);
+        if (!m) {
+          for (const file of videoFiles.slice(0, 3)) {
+            const fileName = file.short_name || file.name;
+            t = cleanTitle(fileName, { ignoreRisky });
+            y = extractYear(fileName);
+            m = await searchTmdb(t, y, torrentType, apiKey);
+            if (m) break;
+          }
+        }
+        return m;
+      };
+
+      let tmdb = await attempt(false);
       if (!tmdb) {
-        const videoFiles = (torrent.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name));
-        for (const file of videoFiles.slice(0, 3)) {
-          const fileName = file.short_name || file.name;
-          title = cleanTitle(fileName);
-          year = extractYear(fileName);
-          tmdb = await searchTmdb(title, year, torrentType, apiKey);
-          if (tmdb) break;
+        // A short language code (e.g. "CHI") can coincidentally match part
+        // of a real title ("Shang-Chi") and cut it short. Only worth a
+        // second search if ignoring those actually changes the query.
+        const strictTitle = cleanTitle(torrent.name);
+        const looseTitle = cleanTitle(torrent.name, { ignoreRisky: true });
+        if (looseTitle !== strictTitle) {
+          tmdb = await attempt(true);
+          if (tmdb) console.error(`rebuildTorrentIndex: matched "${torrent.name}" via risky-code retry ("${looseTitle}")`);
         }
       }
+
       if (!tmdb) {
         console.error(`rebuildTorrentIndex: no TMDB match for "${torrent.name}" (id ${torrent.id})`);
         return null;
@@ -975,17 +1001,22 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
     let pairs = buildPairs(indexed);
     console.error(`Stream ${id}${season !== null ? ` S${season}E${episode}` : ''}: ${indexed.length} indexed torrents for this title, ${pairs.length} file matches${pairs.length ? ' — ' + pairs.map(p => p.file.short_name || p.file.name).join(', ') : ''}`);
 
-    if (!pairs.length && season !== null && episode !== null && season > 1 && indexed.length) {
-      // Torrent's already indexed for this show, just not under this
-      // season/episode combo — some releases number episodes absolutely
-      // across the whole series instead of restarting each season.
+    if (season !== null && episode !== null && season > 1 && indexed.length) {
+      // Torrent's already indexed for this show — always also check
+      // whether it's numbered absolutely across the whole series instead
+      // of restarting each season, since a direct match existing doesn't
+      // mean an absolute-numbered release isn't also a legitimate option.
       try {
         const targetMeta = await findByImdbId(id, torrentType, apiKey);
         if (targetMeta && targetMeta.id) {
           const counts = await getSeasonEpisodeCounts(targetMeta.id, apiKey);
           let absolute = episode;
           for (let s = 1; s < season; s++) absolute += counts[s] || 0;
-          if (absolute !== episode) pairs = buildPairs(indexed, absolute);
+          if (absolute !== episode) {
+            const absolutePairs = buildPairs(indexed, absolute);
+            const seen = new Set(pairs.map(p => `${p.torrent.id}:${p.file.id}`));
+            pairs = [...pairs, ...absolutePairs.filter(p => !seen.has(`${p.torrent.id}:${p.file.id}`))];
+          }
         }
       } catch (e) {
         console.error(`Absolute-episode fallback failed for ${id}:`, e.message);
@@ -1059,14 +1090,18 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
 
         let candidates = findCandidates(wordSets);
         console.error(`Live fallback for ${id}: primary title variants [${wordSets.map(s => s.join(' ')).join(' | ')}] found ${candidates.length} candidates`);
-        if (!candidates.length && targetMeta.id) {
-          // Primary title (plus its variants) found nothing — try TMDB's
-          // alternative titles, for releases using a different regional
-          // name or the original-language title.
+        if (targetMeta.id) {
+          // Always also try TMDB's alternative titles — a show can have
+          // some releases under the primary title and others under a
+          // regional or original-language one, and both are legitimate.
           const altTitles = await getTmdbAlternativeTitles(targetMeta.id, torrentType, apiKey);
           const altSets = altTitles.flatMap(t => titleWordVariants(t));
-          if (altSets.length) candidates = findCandidates(altSets);
-          console.error(`Live fallback for ${id}: ${altTitles.length} alternative titles tried, found ${candidates.length} candidates`);
+          if (altSets.length) {
+            const altCandidates = findCandidates(altSets);
+            const seen = new Set(candidates.map(t => t.id));
+            candidates = [...candidates, ...altCandidates.filter(t => !seen.has(t.id))];
+          }
+          console.error(`Live fallback for ${id}: ${altTitles.length} alternative titles tried, ${candidates.length} total candidates`);
         }
 
         return { pairs: buildPairs(candidates), candidates, targetMeta };
@@ -1245,21 +1280,34 @@ app.get('/:apiKey/debug', async (req, res) => {
         // Not yet indexed — run the same search a rebuild would, purely to
         // explain why (or to confirm it now succeeds, ahead of the next one).
         const detected = detectType(torrent);
-        let title = cleanTitle(torrent.name);
-        let year = extractYear(torrent.name);
-        let tmdb = await searchTmdb(title, year, detected, apiKey);
-        let viaFile = false;
+        const videoFiles = (torrent.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name));
 
-        // Some torrents have unmatchable/random names but properly-named
-        // files inside — retry against a few file names before giving up.
+        const attempt = async (ignoreRisky) => {
+          let t = cleanTitle(torrent.name, { ignoreRisky });
+          let y = extractYear(torrent.name);
+          let m = await searchTmdb(t, y, detected, apiKey);
+          let viaFile = false;
+          if (!m) {
+            for (const file of videoFiles.slice(0, 3)) {
+              const fileName = file.short_name || file.name;
+              t = cleanTitle(fileName, { ignoreRisky });
+              y = extractYear(fileName);
+              m = await searchTmdb(t, y, detected, apiKey);
+              if (m) { viaFile = true; break; }
+            }
+          }
+          return { title: t, year: y, tmdb: m, viaFile };
+        };
+
+        let { title, year, tmdb, viaFile } = await attempt(false);
         if (!tmdb) {
-          const videoFiles = (torrent.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv)$/i.test(f.short_name || f.name));
-          for (const file of videoFiles.slice(0, 3)) {
-            const fileName = file.short_name || file.name;
-            const fTitle = cleanTitle(fileName);
-            const fYear = extractYear(fileName);
-            tmdb = await searchTmdb(fTitle, fYear, detected, apiKey);
-            if (tmdb) { title = fTitle; year = fYear; viaFile = true; break; }
+          // A short language code (e.g. "CHI") can coincidentally match
+          // part of a real title — only worth a second search if ignoring
+          // those actually changes the query.
+          const strictTitle = cleanTitle(torrent.name);
+          const looseTitle = cleanTitle(torrent.name, { ignoreRisky: true });
+          if (looseTitle !== strictTitle) {
+            ({ title, year, tmdb, viaFile } = await attempt(true));
           }
         }
 
