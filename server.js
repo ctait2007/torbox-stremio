@@ -841,10 +841,23 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
   const res = rawRes && rawRes.toLowerCase() === '4k' ? '2160p' : rawRes;
   const quality = filename.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] ||
                   title.match(/\b(bluray|bdrip|webrip|web-dl|web|hdtv|hdlight|remux)\b/i)?.[1] || null;
-  const encode = filename.match(/\b(x264|x265|h264|h265|hevc|avc)\b/i)?.[1] ||
-                 title.match(/\b(x264|x265|h264|h265|hevc|avc)\b/i)?.[1] || null;
-  const audio = filename.match(/\b(aac|ac3|dts|atmos|truehd|dd5|eac3|flac)\b/i)?.[1] ||
-                title.match(/\b(aac|ac3|dts|atmos|truehd|dd5|eac3|flac)\b/i)?.[1] || null;
+  // Codec letter and digits are sometimes glued with a dot/space ("H.265")
+  // instead of fused ("H265") — match either, then strip the separator so
+  // the displayed value is consistent regardless of source formatting.
+  const rawEncode = filename.match(/\b(x[.\s]?264|x[.\s]?265|h[.\s]?264|h[.\s]?265|hevc|avc)\b/i)?.[1] ||
+                     title.match(/\b(x[.\s]?264|x[.\s]?265|h[.\s]?264|h[.\s]?265|hevc|avc)\b/i)?.[1] || null;
+  const encode = rawEncode ? rawEncode.replace(/[.\s]/g, '') : null;
+  // No trailing \b: "DDP" in "DDP5.1" is immediately followed by a digit
+  // with no separator, so a boundary there would never match.
+  const audio = filename.match(/\b(aac|ac3|eac3|dts-hd|dts|atmos|truehd|ddp|dd\+|dd5|flac)/i)?.[1] ||
+                title.match(/\b(aac|ac3|eac3|dts-hd|dts|atmos|truehd|ddp|dd\+|dd5|flac)/i)?.[1] || null;
+  // Channel config (5.1, 7.1, 7.1.4) — same shape as the audio-spec check
+  // used elsewhere for episode-number false-positive protection. Lookbehind
+  // instead of \b on the leading edge for the same reason as audio above
+  // (a codec letter like the "P" in "DDP5.1" sits directly against it).
+  const channelMatch = filename.match(/(?<!\d)([2567])[.\s]([01])(?:[.\s](\d))?\b/) ||
+                        title.match(/(?<!\d)([2567])[.\s]([01])(?:[.\s](\d))?\b/);
+  const channels = channelMatch ? channelMatch.slice(1).filter(Boolean).join('.') : null;
   const hdr = filename.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] ||
               title.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] || null;
   const bitDepth = filename.match(/\b(10bit|8bit)\b/i)?.[1] ||
@@ -869,7 +882,11 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
     bitDepth ? `➤ ${bitDepth}` : null,
   ].filter(Boolean);
   const line3 = qualityParts.length > 0 ? qualityParts.join(' ') : null;
-  const line4 = audio ? `🎧 ${audio.toUpperCase()}` : null;
+  const audioParts = [
+    audio ? `🎧 ${audio.toUpperCase()}` : null,
+    channels ? `➤ ${channels}` : null,
+  ].filter(Boolean);
+  const line4 = audioParts.length > 0 ? audioParts.join(' ') : null;
   const sizeStr = filesize > 0 ? `📦 ${(filesize / 1024 / 1024 / 1024).toFixed(2)} GB` : null;
   const containerStr = container ? `.${container.toLowerCase()}` : null;
   const line5 = [sizeStr, containerStr].filter(Boolean).join(' ➤ ');
