@@ -834,7 +834,7 @@ async function rebuildTorrentIndex(apiKey) {
   return index;
 }
 
-function formatStreamDescription(filename, title, season, episode, filesize) {
+function formatStreamDescription(filename, title, season, episode, filesize, year) {
   // 4k and 2160p are the same thing — normalize so labeling/bingeGroup match.
   const rawRes = filename.match(/\b(2160p|4k|1080p|720p|576p|480p)\b/i)?.[1] ||
                  title.match(/\b(2160p|4k|1080p|720p|576p|480p)\b/i)?.[1] || null;
@@ -858,6 +858,10 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
   const channelMatch = filename.match(/(?<!\d)([2567])[.\s]([01])(?:[.\s](\d))?\b/) ||
                         title.match(/(?<!\d)([2567])[.\s]([01])(?:[.\s](\d))?\b/);
   const channels = channelMatch ? channelMatch.slice(1).filter(Boolean).join('.') : null;
+  // Every language code present, not just the first — releases often list
+  // several ("Rus.Ukr.Eng").
+  const langMatches = filename.match(/\b(MULTi|MULTI|DUAL|DUBBED|SUBBED|ENG|RUS|UKR|FRE|FRA|GER|ITA|SPA|POR|DUT|NLD|SWE|NOR|DAN|FIN|POL|CZE|HUN|ROM|TUR|KOR|CHI|ARA|HEB|HIN|THA|VIE|IND|JPN)\b/gi) || [];
+  const languages = [...new Set(langMatches.map(l => l.toUpperCase()))].join(' • ') || null;
   const hdr = filename.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] ||
               title.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] || null;
   const bitDepth = filename.match(/\b(10bit|8bit)\b/i)?.[1] ||
@@ -869,11 +873,12 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
     '576p': '📀 SD', '480p': '📀 LQ'
   }[res.toLowerCase()] || `📺 ${res}`) : '⁉️ Unknown';
 
+  const yearTag = year ? ` (${year})` : '';
   const episodeTag = (season !== null && episode !== null)
     ? ` • S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}` : '';
   // Raw filename first — aggregator parsers verify against this directly.
   const line0 = filename || null;
-  const line1 = title ? `🎬 ${title}${episodeTag}` : null;
+  const line1 = title ? `🎬 ${title}${yearTag}${episodeTag}` : null;
   const line2 = resIcon;
   const qualityParts = [
     quality ? `🎥 ${quality.toUpperCase()}` : null,
@@ -887,10 +892,11 @@ function formatStreamDescription(filename, title, season, episode, filesize) {
     channels ? `➤ ${channels}` : null,
   ].filter(Boolean);
   const line4 = audioParts.length > 0 ? audioParts.join(' ') : null;
+  const line4b = languages ? `⚑ ${languages}` : null;
   const sizeStr = filesize > 0 ? `📦 ${(filesize / 1024 / 1024 / 1024).toFixed(2)} GB` : null;
   const containerStr = container ? `.${container.toLowerCase()}` : null;
   const line5 = [sizeStr, containerStr].filter(Boolean).join(' ➤ ');
-  const description = [line0, line1, line2, line3, line4, line5].filter(Boolean).join('\n');
+  const description = [line0, line1, line2, line3, line4, line4b, line5].filter(Boolean).join('\n');
 
   // Plain label for bingeGroup, separate from the emoji display version.
   const resolutionLabel = res ? res.toLowerCase() : 'unknown';
@@ -1160,7 +1166,8 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
         filename,
         cleanTitle(torrent.name),
         season, episode,
-        file.size || 0
+        file.size || 0,
+        extractYear(torrent.name)
       );
       return {
         url: `https://api.torbox.app/v1/api/torrents/requestdl?token=${apiKey}&torrent_id=${torrent.id}&file_id=${file.id}&redirect=true`,
