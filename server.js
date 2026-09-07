@@ -409,6 +409,14 @@ function wordsOf(str) {
   return (str || '').toLowerCase().replace(/'/g, '').match(/[a-z0-9]+/g) || [];
 }
 
+// Strips audio channel specs ("5.1", "DDP5.1", "DD 5 1 Atmos") before
+// bare/ranged episode-number matching — the isolated "1" in a 5.1/7.1
+// surround-sound tag otherwise reads identically to "episode 1", and
+// this tag appears in the overwhelming majority of modern releases.
+function stripAudioSpec(name) {
+  return name.replace(/(?<!\d)[2567][.\s][01](?:[.\s]\d)?\b/gi, ' ');
+}
+
 // ── TMDB matching: exact → no article → pre-colon → fuzzy word overlap with
 // year adjustment. No single-result shortcut — a wrong match is worse than none.
 
@@ -908,10 +916,10 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
               || torrent.name.match(/\bSeason\s*(\d{1,2})\b/i);
             const torrentSeason = seasonMatch ? parseInt(seasonMatch[1]) : null;
             if (torrentSeason === null || torrentSeason === season) {
-              filtered = videoFiles.filter(f => barePattern.test(f.name));
+              filtered = videoFiles.filter(f => barePattern.test(stripAudioSpec(f.name)));
               if (!filtered.length) {
                 filtered = videoFiles.filter(f => {
-                  const m = f.name.match(rangePattern);
+                  const m = stripAudioSpec(f.name).match(rangePattern);
                   if (!m) return false;
                   const a = parseInt(m[1]), b = parseInt(m[2]);
                   return episodeToMatch >= Math.min(a, b) && episodeToMatch <= Math.max(a, b);
