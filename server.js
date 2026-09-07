@@ -371,7 +371,7 @@ const JUNK_PATTERNS = [
   { pattern: /\bCOMPLETO\b/i, minIndex: 0 },
   { pattern: /\bLF[_\s]/i, minIndex: 0 },
   { pattern: /\b(19|20)\d{2}\b/, minIndex: 1 },
-  { pattern: /\b(MULTi|MULTI|VFF|VF|VO|VOST|TRUEFRENCH|ITA|ENG|SPA|POR|RUS|RU|RUSENG|JPN|GER|FRE|FRA|DUT|NLD|SWE|NOR|DAN|FIN|POL|CZE|HUN|ROM|TUR|KOR|CHI|ARA|HEB|HIN|THA|VIE|IND|DUBBED|SUBBED|DUAL|MULTI5|MULTI6|MULTISUB)\b/i, minIndex: 1 },
+  { pattern: /\b(MULTi|MULTI|VFF|VF|VO|VOST|TRUEFRENCH|ITA|ENG|SPA|POR|RUS|RU|RUSENG|JPN|GER|FRE|FRA|DUT|NLD|SWE|NOR|DAN|FIN|POL|CZE|HUN|ROM|TUR|KOR|ARA|HEB|HIN|THA|VIE|IND|DUBBED|SUBBED|DUAL|MULTI5|MULTI6|MULTISUB)\b/i, minIndex: 1 },
   { pattern: /\b(1080p|720p|2160p|4k|bluray|bdrip|webrip|web-dl|web|hdtv|x264|x265|hevc|aac|dd5|h264|h265|remux|hdlight|10bit|8bit|ac3|dts|atmos)\b/i, minIndex: 0 },
   { pattern: /\b(proper|repack|extended|theatrical|directors\.?cut)\b/i, minIndex: 0 },
 ];
