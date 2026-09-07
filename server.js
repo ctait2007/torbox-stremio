@@ -953,7 +953,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       .map(entry => entry.torrent);
 
     let pairs = buildPairs(indexed);
-    console.error(`Stream ${id}${season !== null ? ` S${season}E${episode}` : ''}: ${indexed.length} indexed torrents for this title, ${pairs.length} file matches`);
+    console.error(`Stream ${id}${season !== null ? ` S${season}E${episode}` : ''}: ${indexed.length} indexed torrents for this title, ${pairs.length} file matches${pairs.length ? ' — ' + pairs.map(p => p.file.short_name || p.file.name).join(', ') : ''}`);
 
     if (!pairs.length && season !== null && episode !== null && season > 1 && indexed.length) {
       // Torrent's already indexed for this show, just not under this
@@ -1071,6 +1071,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       console.error(`Unmatched-torrent fallback gave up for ${id}:`, e.message);
     }
 
+    console.error(`Stream ${id}${season !== null ? ` S${season}E${episode}` : ''}: final result ${pairs.length} pairs${pairs.length ? ' — ' + pairs.map(p => p.file.short_name || p.file.name).join(', ') : ''}`);
     if (!pairs.length) return res.json({ streams: [] });
 
     const streams = pairs.map(({ file, torrent }) => {
