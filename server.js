@@ -603,7 +603,10 @@ function titleWordVariants(title) {
   const variants = [];
   const push = (t) => { const w = wordsOf(t); if (w.length) variants.push(w); };
   push(title);
-  const preColon = title.split(/[:\-–]/)[0];
+  // Colon always separates a subtitle; a dash only when spaced on both
+  // sides. A fused hyphen ("Spider-Man") is part of the name itself, and
+  // splitting there yields a uselessly weak one-word variant.
+  const preColon = title.split(/:|\s[-–]\s/)[0];
   if (preColon !== title) push(preColon);
   const noArticle = title.replace(/^(the|a|an)\s+/i, '');
   if (noArticle !== title) push(noArticle);
@@ -945,6 +948,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
       .map(entry => entry.torrent);
 
     let pairs = buildPairs(indexed);
+    console.error(`Stream ${id}${season !== null ? ` S${season}E${episode}` : ''}: ${indexed.length} indexed torrents for this title, ${pairs.length} file matches`);
 
     if (!pairs.length && season !== null && episode !== null && season > 1 && indexed.length) {
       // Torrent's already indexed for this show, just not under this
