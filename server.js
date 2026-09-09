@@ -429,7 +429,8 @@ function stripAudioSpec(name) {
 // ── TMDB matching: exact → no article → pre-colon → fuzzy word overlap with
 // year adjustment. No single-result shortcut — a wrong match is worse than none.
 
-function pickBestMatch(results, title, year) {
+function pickBestMatch(results, title, year, diag) {
+  if (diag) diag.resultCount = results.length;
   if (!results.length) return null;
   const normalizedSearch = normalizeTitle(title);
   const stripArticle = s => (s || '').replace(/^(the|a|an)\s+/i, '');
@@ -480,13 +481,17 @@ function pickBestMatch(results, title, year) {
       const total = candidateScore + yearAdjustment;
       if (total > bestScore) { bestScore = total; best = r; }
     }
+    if (diag) {
+      diag.bestCandidate = best ? (best.title || best.name) : null;
+      diag.bestScore = Math.round(bestScore * 100) / 100;
+    }
     if (best && bestScore >= 0.6) return best;
   }
 
   return null;
 }
 
-async function searchTmdb(title, year, type, apiKey, retries = 3, bypassCache = false) {
+async function searchTmdb(title, year, type, apiKey, retries = 3, bypassCache = false, diag) {
   const cache = getCache(apiKey);
   const cacheKey = `${title}:${year || 'noyear'}:${type}`;
   const cached = cache.tmdb.get(cacheKey);
@@ -513,8 +518,10 @@ async function searchTmdb(title, year, type, apiKey, retries = 3, bypassCache = 
         results = json.results || [];
       }
 
+      if (diag) diag.candidates = results.slice(0, 5).map(r => `${r.title || r.name} (${(r.release_date || r.first_air_date || '').slice(0, 4) || '?'})`);
+
       if (results.length) {
-        const match = pickBestMatch(results, title, year);
+        const match = pickBestMatch(results, title, year, diag);
         if (match) {
           cache.tmdb.set(cacheKey, { value: match, expiry: Date.now() + TMDB_CACHE_TTL });
           return match;
@@ -861,11 +868,17 @@ function formatStreamDescription(filename, title, season, episode, filesize, yea
   // Every language code present, not just the first — releases often list
   // several ("Rus.Ukr.Eng").
   const langMatches = filename.match(/\b(MULTi|MULTI|DUAL|DUBBED|SUBBED|ENG|RUS|UKR|FRE|FRA|GER|ITA|SPA|POR|DUT|NLD|SWE|NOR|DAN|FIN|POL|CZE|HUN|ROM|TUR|KOR|CHI|ARA|HEB|HIN|THA|VIE|IND|JPN)\b/gi) || [];
-  const languages = [...new Set(langMatches.map(l => l.toUpperCase()))].join(' • ') || null;
-  const hdr = filename.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] ||
-              title.match(/\b(hdr10|hdr|dv|dolby\.vision)\b/i)?.[1] || null;
-  const bitDepth = filename.match(/\b(10bit|8bit)\b/i)?.[1] ||
-                   title.match(/\b(10bit|8bit)\b/i)?.[1] || null;
+  const langCodes = [...new Set(langMatches.map(l => l.toUpperCase()))];
+  langCodes.sort((a, b) => (a === 'ENG' ? -1 : b === 'ENG' ? 1 : 0));
+  const languages = langCodes.join(' • ') || null;
+  // HDR10+/Plus, and Dolby Vision written with a dot, space, or nothing
+  // between the two words, all need to match — same "glued variant" gap
+  // as the encode/audio fixes above.
+  const hdr = filename.match(/\b(hdr10\+|hdr10\s*plus|hdr10|hdr|dv|dolby[.\s]?vision)\b/i)?.[1] ||
+              title.match(/\b(hdr10\+|hdr10\s*plus|hdr10|hdr|dv|dolby[.\s]?vision)\b/i)?.[1] || null;
+  // "10bit", "10-bit", and "10 bit" are all real variants.
+  const bitDepth = filename.match(/\b(10|8)[\s-]?bit\b/i)?.[0] ||
+                   title.match(/\b(10|8)[\s-]?bit\b/i)?.[0] || null;
   const container = filename.match(/\.(mkv|mp4|avi|mov|wmv)$/i)?.[1] || null;
 
   const resIcon = res ? ({
@@ -1191,7 +1204,7 @@ app.get('/:apiKey/stream/:type/:id.json', async (req, res) => {
 // Self-serve diagnostics — shows every torrent's detected type, cleaned
 // title, TMDB match, or the exact reason it failed to match. Movies/series/
 // errors are one filterable, color-coded list instead of separate pages.
-function renderDebugHtml(results) {
+function renderDebugHtml(results, apiKey) {
   const ok = results.filter(r => !r.issue).length;
   const counts = {
     movie: results.filter(r => !r.issue && r.detectedType === 'movie').length,
@@ -1243,6 +1256,7 @@ function renderDebugHtml(results) {
 <body>
   <h1>Debug</h1>
   <p class="subtitle">${ok} of ${results.length} matched</p>
+  ${counts.error > 0 ? `<p class="subtitle"><a href="/${apiKey}/debug/diagnose" style="color:#7c3aed;">Diagnose all ${counts.error} error${counts.error === 1 ? '' : 's'} →</a></p>` : ''}
   <input type="text" id="search" placeholder="Search...">
   <div class="filters">
     <div class="filter-btn active" data-filter="all">All (${results.length})</div>
@@ -1273,6 +1287,60 @@ function renderDebugHtml(results) {
       });
     });
   </script>
+</body>
+</html>`;
+}
+
+function renderDiagnoseHtml(results) {
+  const rows = results.map(r => {
+    const s = r.strictDiag || {};
+    const l = r.looseDiag;
+    return `
+    <div class="row">
+      <div class="torrent">${r.torrent}</div>
+      <div class="fields">
+        <span><b>Type:</b> ${r.detected}</span>
+        <span><b>Year:</b> ${r.year || '—'}</span>
+      </div>
+      <div class="attempt">
+        <b>Strict:</b> "${r.strictTitle}" — ${s.resultCount || 0} TMDB result${s.resultCount === 1 ? '' : 's'}
+        ${s.bestCandidate ? ` — closest: "${s.bestCandidate}" (score ${s.bestScore})` : ''}
+      </div>
+      ${s.candidates && s.candidates.length ? `<div class="candidates">${s.candidates.join(' · ')}</div>` : ''}
+      ${l ? `
+      <div class="attempt loose">
+        <b>Ignoring risky codes:</b> "${r.looseTitle}" — ${l.resultCount || 0} TMDB result${l.resultCount === 1 ? '' : 's'}
+        ${l.bestCandidate ? ` — closest: "${l.bestCandidate}" (score ${l.bestScore})` : ''}
+      </div>
+      ${l.candidates && l.candidates.length ? `<div class="candidates">${l.candidates.join(' · ')}</div>` : ''}` : ''}
+    </div>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diagnose</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f0f0f; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 24px; max-width: 700px; margin: 0 auto; }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .subtitle { color: #888; font-size: 13px; margin-bottom: 16px; }
+    .row { background: #1a1a1a; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; border-left: 3px solid #dc2626; }
+    .torrent { font-size: 13px; color: #ddd; word-break: break-all; margin-bottom: 8px; }
+    .fields { display: flex; gap: 16px; font-size: 12px; color: #999; margin-bottom: 6px; }
+    .fields b { color: #ccc; }
+    .attempt { font-size: 12px; color: #ccc; margin-top: 6px; }
+    .attempt b { color: #f59e0b; }
+    .attempt.loose b { color: #7c3aed; }
+    .candidates { font-size: 11px; color: #777; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <h1>Diagnose</h1>
+  <p class="subtitle">${results.length} unmatched torrent${results.length === 1 ? '' : 's'} checked — closest TMDB candidate shown even below the match threshold</p>
+  <div id="rows">${rows || '<p class="subtitle">Nothing unmatched right now.</p>'}</div>
 </body>
 </html>`;
 }
@@ -1358,14 +1426,56 @@ app.get('/:apiKey/debug', async (req, res) => {
     }
     res.setHeader('Content-Type', 'text/html');
     res.setHeader('Cache-Control', 'no-store');
-    res.send(renderDebugHtml(results));
+    res.send(renderDebugHtml(results, apiKey));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Old per-type links (movie/series/anime) still work, redirected to the merged page.
+// Runs the same search every unmatched torrent would get on rebuild, but
+// reports the full picture instead of pass/fail: what TMDB actually
+// returned, and how close the best candidate got even if it fell short of
+// the match threshold. Built to replace the one-at-a-time "add a log line,
+// redeploy, retest" cycle with a single pass over everything unmatched.
+app.get('/:apiKey/debug/diagnose', async (req, res) => {
+  try {
+    const { apiKey } = req.params;
+    const index = await getTorrentIndex(apiKey);
+    const alreadyIndexedIds = new Set(index.map(e => e.torrent.id));
+    const library = await getTorboxLibrary(apiKey);
+    const unmatched = library.filter(t => !alreadyIndexedIds.has(t.id));
+
+    const results = await mapWithConcurrency(unmatched, REBUILD_CONCURRENCY, async (torrent) => {
+      const detected = detectType(torrent);
+      const strictTitle = cleanTitle(torrent.name);
+      const looseTitle = cleanTitle(torrent.name, { ignoreRisky: true });
+      const year = extractYear(torrent.name);
+
+      const strictDiag = {};
+      await searchTmdb(strictTitle, year, detected, apiKey, 1, false, strictDiag);
+
+      let looseDiag = null;
+      if (looseTitle !== strictTitle) {
+        looseDiag = {};
+        await searchTmdb(looseTitle, year, detected, apiKey, 1, false, looseDiag);
+      }
+
+      return { torrent: torrent.name, detected, strictTitle, looseTitle: looseTitle !== strictTitle ? looseTitle : null, year, strictDiag, looseDiag };
+    });
+
+    if (req.query.format === 'json') {
+      res.setHeader('Content-Type', 'application/json');
+      return res.json(results);
+    }
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(renderDiagnoseHtml(results));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 app.get('/:apiKey/debug/:type', (req, res) => res.redirect(`/${req.params.apiKey}/debug`));
 
 app.get('/:apiKey/refresh', async (req, res) => {
